@@ -132,6 +132,16 @@ export class EntriesClient {
     }
 
     /**
+     * Undoes a split: Toshl recreates the original entry and deletes every child linked to it
+     * @param parentId ID of the split's parent entry
+     * @returns void
+     */
+    async undoSplit(parentId: string): Promise<void> {
+        logger.debug('Undoing entry split', { parentId });
+        await this.client.delete<void>(`/entries/split/${assertResourceId(parentId)}`);
+    }
+
+    /**
      * Manages entries in bulk
      * @param params Management parameters
      * @returns void

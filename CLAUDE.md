@@ -75,8 +75,8 @@ transaction history, income, and budgets for a named individual. Invariants 1 an
 are the ones worth being paranoid about.
 
 The server is **not read-only** — `entry_create`, `entry_update`, `entry_delete`,
-`entry_convert_to_transfer`, and `entry_manage` write via `POST`/`PUT`/`DELETE` in
-`toshl-client.ts`. Writing is a supported, intended capability, and new write tools are
+`entry_convert_to_transfer`, `entry_manage`, `entry_split`, and `entry_split_undo` write via
+`POST`/`PUT`/`DELETE` in `toshl-client.ts`. Writing is a supported, intended capability, and new write tools are
 ordinary feature work. The risk they carry is data integrity: destroying bookkeeping the
 user cannot recover. Build them so a destructive action is explicit, scoped to what its
 name implies, and never described as read-only.
