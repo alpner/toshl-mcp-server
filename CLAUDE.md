@@ -36,15 +36,22 @@ semicolons, arrow functions, `async`/`await`, PascalCase types, camelCase values
 
 ```
 yarn build                                                   # tsc — the real typecheck gate
-yarn test --testPathIgnorePatterns "/node_modules/" "/tests/api/"   # credential-free suites
+yarn test --testPathIgnorePatterns 'node_modules' 'tests.api.'   # credential-free suites
 yarn test                                                    # ALL suites; needs a live token
 yarn dev                                                     # ts-node
 ```
 
 `tests/api/**` are **integration tests against the live Toshl API**. They fail without a
-real `TOSHL_API_TOKEN` and, when they do run, they hit a real account. CI runs only the
-credential-free suites; see `.github/workflows/ci.yml`. Mocking the HTTP layer in
-`tests/api/**` is the highest-value outstanding test task.
+real `TOSHL_API_TOKEN` and, when they do run, they hit a real account — `entries.test.ts`
+creates, edits, bulk-manages and deletes entries. Jest loads `.env` (`setupFiles:
+["dotenv/config"]`), so a local `.env` with a real token is enough to make them run.
+CI runs only the credential-free suites; see `.github/workflows/ci.yml`. Mocking the HTTP
+layer in `tests/api/**` is the highest-value outstanding test task.
+
+Keep the ignore patterns free of leading `/`. Git Bash on Windows rewrites any argument that
+starts with `/` into a Windows path (`"/tests/api/"` becomes `C:/Program Files/Git/tests/api/`),
+which matches nothing, and every live suite runs. `tests.api.` matches either separator and
+survives every shell. Before a run you are not sure of, `--listTests` shows what it would execute.
 
 ## Security invariants
 
