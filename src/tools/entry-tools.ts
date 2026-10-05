@@ -1,7 +1,8 @@
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
-import { createEntriesClient } from '../api/endpoints/entries.js';
+import { createEntriesClient, EntriesClient } from '../api/endpoints/entries.js';
 import { createCategoriesClient } from '../api/endpoints/categories.js';
-import { ToshlTransaction } from '../utils/types.js';
+import { ToshlEntry, ToshlImage, ToshlTransaction } from '../utils/types.js';
+import { evaluateSplitParent, evaluateSplitParts, SplitParentVerdict, SplitPartsVerdict, toCents } from './split-guard.js';
 import logger from '../utils/logger.js';
 
 // Toshl's documented page-size bounds for list endpoints
@@ -418,6 +419,69 @@ export function setupEntryTools() {
                         type: 'string',
                         description: 'Delete mode for repeating entries (all, one, tail)',
                         enum: ['all', 'one', 'tail'],
+                    },
+                },
+                required: ['id'],
+            },
+        },
+        {
+            name: 'entry_split',
+            description: 'Split an existing expense or income entry into two or more parts, each with its own category, '
+                + 'tags and description, using Toshl\'s native split. Parts inherit the original\'s account, date and '
+                + 'currency, and their amounts must add up exactly to the original amount. The original is hidden and '
+                + 'kept as the split\'s parent; entry_split_undo restores it. If a part fails to save, the split is undone.',
+            inputSchema: {
+                type: 'object',
+                properties: {
+                    id: {
+                        type: 'string',
+                        description: 'ID of the entry to split',
+                    },
+                    parts: {
+                        type: 'array',
+                        minItems: 2,
+                        description: 'Parts to split the entry into. Their amounts must add up exactly to the entry amount.',
+                        items: {
+                            type: 'object',
+                            properties: {
+                                amount: {
+                                    type: 'number',
+                                    description: 'Part amount, with the same sign as the entry (negative for expense, positive for income)',
+                                },
+                                category: {
+                                    type: 'string',
+                                    description: 'Category ID for this part',
+                                },
+                                tags: {
+                                    type: 'array',
+                                    description: 'Array of tag IDs for this part',
+                                    items: {
+                                        type: 'string',
+                                    },
+                                },
+                                desc: {
+                                    type: 'string',
+                                    description: 'Description for this part. Defaults to the original entry\'s description.',
+                                },
+                            },
+                            required: ['amount', 'category'],
+                        },
+                    },
+                },
+                required: ['id', 'parts'],
+            },
+        },
+        {
+            name: 'entry_split_undo',
+            description: 'Undo a split in Toshl Finance. This is destructive: it deletes every child entry of the split, '
+                + 'including any changes made to them since the split, and restores the original entry. Takes the ID '
+                + 'of the split\'s parent (the original entry), not of one of its parts.',
+            inputSchema: {
+                type: 'object',
+                properties: {
+                    id: {
+                        type: 'string',
+                        description: 'ID of the split\'s parent entry',
                     },
                 },
                 required: ['id'],
@@ -1000,6 +1064,315 @@ export async function handleEntryConvertToTransferTool(args: { id: string; desti
     }
 }
 
+/** One part of an entry_split call, as described by the tool's input schema */
+interface SplitPart {
+    amount: number;
+    category: string;
+    tags?: string[];
+    desc?: string;
+}
+
+/** What an entry_split call has written so far, for rollback and for reporting */
+interface SplitProgress {
+    parentId: string;
+    parentCents: number;
+    created: ToshlEntry[];
+    assignedCents: number;
+}
+
+const errorResult = (text: string) => ({
+    content: [{ type: 'text', text }],
+    isError: true,
+});
+
+/** Formats integer cents as a signed amount with two decimals, e.g. -1000 as "-10.00" */
+const formatCents = (cents: number): string => (cents / 100).toFixed(2);
+
+const hasSplitChildren = (entry: ToshlEntry): boolean =>
+    Array.isArray(entry.split?.children) && entry.split.children.length > 0;
+
+const describeParentRefusal = (id: string, verdict: Exclude<SplitParentVerdict, { allowed: true }>): string => {
+    switch (verdict.reason) {
+        case 'split-child':
+            return `Entry ${id} is itself a part of a split (its original entry is ${verdict.parentId}), so it was not split again.`;
+        case 'already-split':
+            return `Entry ${id} has already been split.`;
+        case 'deleted':
+            return `Entry ${id} is deleted.`;
+        case 'transfer':
+            return `Entry ${id} is a transfer between accounts, which entry_split does not split.`;
+        case 'repeating':
+            return `Entry ${id} is a repeating entry, which entry_split does not split.`;
+        case 'unknown-amount':
+            return `The amount of entry ${id} could not be read as a whole number of cents.`;
+    }
+};
+
+const describePartsRefusal = (verdict: Exclude<SplitPartsVerdict, { allowed: true }>): string => {
+    switch (verdict.reason) {
+        case 'unknown-amount':
+            return 'The entry amount could not be read as a whole number of cents.';
+        case 'too-few-parts':
+            return `A split needs at least 2 parts; ${verdict.count} given.`;
+        case 'missing-category':
+            return `Part ${verdict.index + 1} has no category.`;
+        case 'invalid-field':
+            return verdict.field === 'tags'
+                ? `Part ${verdict.index + 1} has tags that are not an array of tag IDs.`
+                : `Part ${verdict.index + 1} has a description that is not text.`;
+        case 'invalid-amount':
+            return `Part ${verdict.index + 1} has an amount that is zero, not a number, or finer than a cent.`;
+        case 'sign-mismatch':
+            return `Part ${verdict.index + 1} has the opposite sign to the entry. Every part of an expense is negative `
+                + 'and every part of an income is positive.';
+        case 'sum-mismatch':
+            return `The parts add up to ${formatCents(verdict.partsCents)} but the entry amount is `
+                + `${formatCents(verdict.parentCents)} (difference ${formatCents(verdict.differenceCents)}).`;
+    }
+};
+
+/**
+ * Builds the create payload for one split child. Only the documented part fields are taken
+ * from the caller; everything the child inherits comes from the parent as Toshl returned it.
+ */
+const buildSplitChild = (parent: ToshlEntry, part: SplitPart): Partial<ToshlEntry> => {
+    const { code, rate, main_rate, fixed } = parent.currency;
+    const child: Partial<ToshlEntry> = {
+        amount: part.amount,
+        currency: { code, rate, main_rate, fixed },
+        date: parent.date,
+        desc: part.desc ?? parent.desc,
+        account: parent.account,
+        category: part.category,
+        split: { parent: parent.id },
+    };
+
+    if (part.tags !== undefined) {
+        child.tags = part.tags;
+    }
+
+    // Splits made in the Toshl app attach the parent's images to every child.
+    if (Array.isArray(parent.images) && parent.images.length > 0) {
+        child.images = parent.images.map(({ id }) => ({ id })) as ToshlImage[];
+    }
+
+    return child;
+};
+
+/**
+ * Undoes a split that could not be completed or confirmed, and reports what happened.
+ * Never reports success: whatever the outcome, the split the caller asked for did not happen.
+ */
+const rollBackSplit = async (entriesClient: EntriesClient, progress: SplitProgress, reason: string) => {
+    const { parentId, parentCents, created, assignedCents } = progress;
+
+    // A create can land on Toshl even though the client saw it fail (a timeout, or the
+    // read-back failing). So when no part is known to exist, ask Toshl whether the split
+    // started before concluding there is nothing to undo.
+    if (created.length === 0) {
+        let current: ToshlEntry;
+        try {
+            current = await entriesClient.getEntry(parentId);
+        } catch (error) {
+            logger.error('Could not re-read entry after a failed split', { parentId, error: (error as Error).message });
+            return errorResult(`Splitting entry ${parentId} failed: ${reason}. Whether Toshl had already started the `
+                + `split could not be checked (${(error as Error).message}). If entry ${parentId} is now hidden, `
+                + 'entry_split_undo restores it.');
+        }
+
+        if (!current.deleted && !hasSplitChildren(current)) {
+            return errorResult(`Splitting entry ${parentId} failed: ${reason}. No part was saved; the entry is unchanged.`);
+        }
+    }
+
+    try {
+        await entriesClient.undoSplit(parentId);
+    } catch (undoError) {
+        const createdIds = created.map((entry) => entry.id).join(', ') || 'none confirmed';
+        logger.error('Rollback of a partial split failed', {
+            parentId,
+            createdIds,
+            error: (undoError as Error).message,
+        });
+        return errorResult(`Splitting entry ${parentId} failed part-way: ${reason}. Undoing the split also failed `
+            + `(${(undoError as Error).message}). Entry ${parentId} is hidden as the split's parent. Child entries `
+            + `created: ${createdIds}. ${formatCents(parentCents - assignedCents)} of the original `
+            + `${formatCents(parentCents)} is not assigned to any of those children, so the account is off by that `
+            + `amount until entry ${parentId} is restored with entry_split_undo or the split is completed by hand.`);
+    }
+
+    return errorResult(`Splitting entry ${parentId} failed: ${reason}. The split was rolled back: its child entries `
+        + 'were deleted and the original entry was restored.');
+};
+
+/**
+ * Handles the entry_split tool
+ * @param args Tool arguments
+ * @returns Tool response
+ */
+export async function handleEntrySplitTool(args: { id: string; parts: SplitPart[] }) {
+    logger.debug('Handling entry_split tool', { args });
+
+    if (!args.id || !args.parts) {
+        return errorResult('Missing required parameters: id and parts are required');
+    }
+
+    try {
+        const entriesClient = await createEntriesClient();
+
+        let parent: ToshlEntry;
+        try {
+            parent = await entriesClient.getEntry(args.id);
+        } catch (error) {
+            return errorResult(`Error reading the entry to split: ${(error as Error).message}. Nothing was changed.`);
+        }
+
+        // Every check runs before the first write: once one child exists, Toshl has already
+        // hidden the parent.
+        const parentVerdict = evaluateSplitParent(parent);
+        if (!parentVerdict.allowed) {
+            return errorResult(`${describeParentRefusal(args.id, parentVerdict)} Nothing was changed.`);
+        }
+
+        const partsVerdict = evaluateSplitParts(parent.amount, args.parts);
+        if (!partsVerdict.allowed) {
+            return errorResult(`${describePartsRefusal(partsVerdict)} Nothing was changed.`);
+        }
+
+        const progress: SplitProgress = {
+            parentId: args.id,
+            parentCents: parentVerdict.amountCents,
+            created: [],
+            assignedCents: 0,
+        };
+
+        // Sequentially, so a failure leaves a known prefix of the parts saved.
+        for (const [index, part] of args.parts.entries()) {
+            try {
+                progress.created.push(await entriesClient.createEntry(buildSplitChild(parent, part)));
+            } catch (error) {
+                logger.error('Split part could not be saved; rolling back', {
+                    parentId: args.id,
+                    part: index + 1,
+                    error: (error as Error).message,
+                });
+                return rollBackSplit(entriesClient, progress,
+                    `part ${index + 1} of ${args.parts.length} could not be saved (${(error as Error).message})`);
+            }
+            progress.assignedCents += toCents(part.amount) as number;
+        }
+
+        const createdIds = progress.created.map((entry) => entry.id);
+
+        let refreshed: ToshlEntry;
+        try {
+            refreshed = await entriesClient.getEntry(args.id);
+        } catch (error) {
+            logger.error('Split parent could not be re-read to confirm the split', {
+                parentId: args.id,
+                error: (error as Error).message,
+            });
+            return errorResult(`All ${createdIds.length} parts of entry ${args.id} were saved (entries `
+                + `${createdIds.join(', ')}), but the entry could not be re-read to confirm that Toshl recorded the `
+                + `split: ${(error as Error).message}`);
+        }
+
+        const linked = (refreshed.split?.children ?? []).map(String);
+        if (refreshed.deleted !== true || !createdIds.every((id) => linked.includes(String(id)))) {
+            return rollBackSplit(entriesClient, progress,
+                'Toshl did not hide the original entry and link every part to it');
+        }
+
+        return {
+            content: [
+                {
+                    type: 'text',
+                    text: JSON.stringify({ parent: refreshed, children: progress.created }, null, 2),
+                },
+            ],
+        };
+    } catch (error) {
+        logger.error('Error handling entry_split tool', { error: (error as Error).message });
+
+        return errorResult(`Error splitting entry: ${(error as Error).message}`);
+    }
+}
+
+/**
+ * Handles the entry_split_undo tool
+ * @param args Tool arguments
+ * @returns Tool response
+ */
+export async function handleEntrySplitUndoTool(args: { id: string }) {
+    logger.debug('Handling entry_split_undo tool', { args });
+
+    if (!args.id) {
+        return errorResult('Missing required parameter: id');
+    }
+
+    try {
+        const entriesClient = await createEntriesClient();
+
+        let entry: ToshlEntry;
+        try {
+            entry = await entriesClient.getEntry(args.id);
+        } catch (error) {
+            return errorResult(`Error reading the split to undo: ${(error as Error).message}. Nothing was changed.`);
+        }
+
+        if (entry.split?.parent) {
+            return errorResult(`Entry ${args.id} is a part of a split, not its original entry. The split's original `
+                + `entry is ${entry.split.parent}. Nothing was changed.`);
+        }
+
+        if (!hasSplitChildren(entry)) {
+            return errorResult(`Entry ${args.id} is not the original entry of a split. Nothing was changed.`);
+        }
+
+        const childIds = (entry.split?.children ?? []).join(', ');
+        await entriesClient.undoSplit(args.id);
+
+        // Whether Toshl restores the original under its old id is not documented. Only report
+        // the restored entry if the old id now reads as a live, unsplit entry.
+        let restored: ToshlEntry | undefined;
+        try {
+            restored = await entriesClient.getEntry(args.id);
+        } catch (error) {
+            logger.debug('Entry could not be re-read after undoing its split', {
+                id: args.id,
+                error: (error as Error).message,
+            });
+        }
+
+        const undone = `The split of entry ${args.id} was undone: its child entries (${childIds}) were deleted and `
+            + 'the original entry was restored.';
+
+        if (!restored || restored.deleted || hasSplitChildren(restored)) {
+            return {
+                content: [
+                    {
+                        type: 'text',
+                        text: `${undone} The restored entry's id could not be confirmed; Toshl may have given it a new id.`,
+                    },
+                ],
+            };
+        }
+
+        return {
+            content: [
+                {
+                    type: 'text',
+                    text: `${undone} Restored entry:\n${JSON.stringify(restored, null, 2)}`,
+                },
+            ],
+        };
+    } catch (error) {
+        logger.error('Error handling entry_split_undo tool', { error: (error as Error).message });
+
+        return errorResult(`Error undoing split: ${(error as Error).message}`);
+    }
+}
+
 /**
  * Handles entry tools
  * @param toolName Tool name
@@ -1026,6 +1399,10 @@ export async function handleEntryTool(toolName: string, args: any) {
             return handleEntryDeleteTool(args);
         case 'entry_manage':
             return handleEntryManageTool(args);
+        case 'entry_split':
+            return handleEntrySplitTool(args as { id: string; parts: SplitPart[] });
+        case 'entry_split_undo':
+            return handleEntrySplitUndoTool(args as { id: string });
         default:
             throw new McpError(
                 ErrorCode.MethodNotFound,

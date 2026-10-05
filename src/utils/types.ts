@@ -120,6 +120,13 @@ export interface ToshlReminder {
     [key: string]: any; // For additional properties
 }
 
+export interface ToshlEntrySplit {
+    /** Set on a split child: the id of the entry it was split from */
+    parent?: string;
+    /** Ids of every child of the split, on the parent and on each child */
+    children?: string[];
+}
+
 export interface ToshlEntry {
     id: string;
     amount: number;
@@ -136,6 +143,8 @@ export interface ToshlEntry {
     images?: ToshlImage[];
     reminders?: ToshlReminder[];
     completed?: boolean;
+    split?: ToshlEntrySplit;
+    deleted?: boolean;
     [key: string]: any; // For additional properties
 }
 
