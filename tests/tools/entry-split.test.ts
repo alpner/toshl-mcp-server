@@ -3,7 +3,8 @@ import { jest } from '@jest/globals';
 // Stub the HTTP layer so the whole validate/create/verify/rollback sequence can be observed
 // without credentials. The stub behaves like Toshl did against a live account: the first
 // child carrying split.parent hides the parent and links every child to it, and
-// DELETE /entries/split/:id restores the parent and removes the children.
+// DELETE /entries/split/:id removes the children and restores the original as a NEW entry
+// (verified 2026-10-06). The old id stays deleted and keeps its stale split.children.
 type Call = (...args: any[]) => Promise<any>;
 const mockGet = jest.fn<Call>();
 const mockPost = jest.fn<Call>();
@@ -22,7 +23,8 @@ const ok = (data: unknown, headers: Record<string, string> = {}) => ({ data, sta
 const PARENT = {
     id: '100', amount: -10, currency: { code: 'EUR', rate: 1, main_rate: 1, fixed: false },
     date: '2026-10-01', desc: 'split test', account: 'acc-cash', category: 'cat-orig', tags: ['t-orig'],
-    images: [{ id: 'img-1', path: 'https://img.toshl.com/1/', status: 'uploaded' }], modified: 'm1',
+    images: [{ id: 'img-1', path: 'https://img.toshl.com/1/', status: 'uploaded' }],
+    created: '2026-10-01T08:00:00Z', modified: 'm1',
 };
 
 const PARTS = [
@@ -35,12 +37,26 @@ let parent: Record<string, any>;
 let children: Array<{ id: string; body: Record<string, any> }>;
 let failGets: Set<string>;
 let linkChildren: boolean;
+// The original as Toshl restored it under a new id, once a split has been undone
+let restored: Record<string, any> | undefined;
+// What the old id reads as after an undo that did not restore it
+let staleParent: Record<string, any> | undefined;
+// Other live entries on the same account and date
+let listed: Array<Record<string, any>>;
+let listLink: string | undefined;
 
 const childIds = () => children.map((child) => child.id);
 
-const routeGet = async (path: string) => {
+const routeGet = async (path: string, _params?: Record<string, any>) => {
     if (failGets.has(path)) { throw new Error(`GET ${path} failed`); }
+    if (path === '/entries') {
+        return ok([...(restored ? [restored] : []), ...listed], listLink ? { link: listLink } : {});
+    }
+    if (restored && path === `/entries/${restored.id}`) {
+        return ok(restored);
+    }
     if (path === `/entries/${parent.id}`) {
+        if (staleParent) { return ok(staleParent); }
         return ok(children.length > 0 && linkChildren
             ? { ...parent, deleted: true, split: { children: childIds() } }
             : parent);
@@ -61,6 +77,9 @@ const createChild = async (path: string, body: Record<string, any>) => {
 
 const undoSplit = async (path: string) => {
     if (path !== `/entries/split/${parent.id}`) { throw new Error(`unexpected DELETE ${path}`); }
+    const { split: _split, deleted: _deleted, ...original } = parent;
+    staleParent = { ...parent, deleted: true, split: { children: childIds() } };
+    restored = { ...original, id: '300', modified: 'm2' };
     children = [];
     return ok(undefined);
 };
@@ -75,6 +94,10 @@ beforeEach(() => {
     children = [];
     failGets = new Set();
     linkChildren = true;
+    restored = undefined;
+    staleParent = undefined;
+    listed = [];
+    listLink = undefined;
     mockGet.mockImplementation(routeGet);
     mockPost.mockImplementation(createChild);
     mockDelete.mockImplementation(undoSplit);
@@ -228,6 +251,35 @@ describe('entry_split', () => {
         expect(textOf(result)).toContain('-4.00');
     });
 
+    test("reports the restored entry's new id when a failed split is rolled back", async () => {
+        mockPost.mockImplementation(async (path: string, body: Record<string, any>) => {
+            if (children.length === 1) { throw new Error('boom'); }
+            return createChild(path, body);
+        });
+
+        const result = await handleEntrySplitTool({ id: '100', parts: PARTS });
+
+        expect(result.isError).toBe(true);
+        expect(textOf(result)).toMatch(/rolled back/i);
+        expect(textOf(result)).toMatch(/restored as entry 300/);
+        expect(textOf(result)).toMatch(/retry .*300/i);
+    });
+
+    test('falls back to the plain rollback text when the restored entry cannot be identified', async () => {
+        mockPost.mockImplementation(async (path: string, body: Record<string, any>) => {
+            if (children.length === 1) { throw new Error('boom'); }
+            return createChild(path, body);
+        });
+        failGets.add('/entries');
+
+        const result = await handleEntrySplitTool({ id: '100', parts: PARTS });
+
+        expect(result.isError).toBe(true);
+        expect(textOf(result)).toMatch(/rolled back/i);
+        expect(textOf(result)).toContain('the original entry was restored.');
+        expect(textOf(result)).not.toMatch(/restored as entry/);
+    });
+
     // The POST can land even though the client saw an error (a timeout, or the follow-up
     // GET failing). Toshl has then already hidden the parent, so it must still be undone.
     test('undoes the split when the first part saved on Toshl but the client saw a failure', async () => {
@@ -277,7 +329,116 @@ describe('entry_split', () => {
 describe('entry_split_undo', () => {
     const splitParent = { ...PARENT, deleted: true, split: { children: ['201', '202'] } };
 
-    test('undoes the split and reports the restored entry', async () => {
+    // The live behaviour (2026-10-06): the old id stays deleted, the original comes back as a new entry.
+    const seedSplit = () => {
+        children = [{ id: '201', body: {} }, { id: '202', body: {} }];
+    };
+
+    test('reports the restored entry under its new id', async () => {
+        seedSplit();
+
+        const result = await handleEntrySplitUndoTool({ id: '100' });
+
+        expect(result.isError).toBeUndefined();
+        expect(mockDelete).toHaveBeenCalledWith('/entries/split/100');
+        expect(textOf(result)).toContain('The split of entry 100 was undone');
+        expect(textOf(result)).toContain('(201, 202)');
+        expect(textOf(result)).toContain('Toshl restored the original as a new entry, 300.');
+        expect(textOf(result)).toContain('"id": "300"');
+        expect(textOf(result)).toContain('"desc": "split test"');
+    });
+
+    test("scopes the lookup of the restored entry to the parent's account and date", async () => {
+        seedSplit();
+
+        await handleEntrySplitUndoTool({ id: '100' });
+
+        const listCalls = mockGet.mock.calls.filter(([path]) => path === '/entries');
+        expect(listCalls).toHaveLength(1);
+        expect(listCalls[0][1]).toMatchObject({
+            from: '2026-10-01', to: '2026-10-01', accounts: 'acc-cash', per_page: 500,
+        });
+    });
+
+    test('picks the restored entry out of the other entries of that day', async () => {
+        seedSplit();
+        listed = [{ ...PARENT, id: '301', desc: 'Groceries', amount: -12.3 }];
+
+        const result = await handleEntrySplitUndoTool({ id: '100' });
+
+        expect(textOf(result)).toContain('new entry, 300.');
+    });
+
+    test('finds the restored entry on a later page', async () => {
+        seedSplit();
+        let pagesServed = 0;
+        mockGet.mockImplementation(async (path: string, params?: Record<string, any>) => {
+            if (path !== '/entries') { return routeGet(path, params); }
+            pagesServed++;
+            return params?.page === 1
+                ? ok([restored])
+                : ok([], { link: '<https://api.toshl.com/entries?page=1&per_page=500>; rel="next"' });
+        });
+
+        const result = await handleEntrySplitUndoTool({ id: '100' });
+
+        expect(pagesServed).toBe(2);
+        expect(textOf(result)).toContain('new entry, 300.');
+    });
+
+    test('reports the undo as done and lists both candidates, claiming neither, when two entries match', async () => {
+        seedSplit();
+        listed = [{ ...PARENT, id: '301', modified: 'm3' }];
+
+        const result = await handleEntrySplitUndoTool({ id: '100' });
+
+        expect(result.isError).toBeUndefined();
+        expect(textOf(result)).toContain('The split of entry 100 was undone');
+        expect(textOf(result)).toContain('300');
+        expect(textOf(result)).toContain('301');
+        expect(textOf(result)).not.toMatch(/restored the original as a new entry/);
+        expect(textOf(result)).not.toContain('"modified"');
+    });
+
+    test('reports the restored entry could not be confirmed when listing fails', async () => {
+        seedSplit();
+        failGets.add('/entries');
+
+        const result = await handleEntrySplitUndoTool({ id: '100' });
+
+        expect(result.isError).toBeUndefined();
+        expect(textOf(result)).toContain('The split of entry 100 was undone');
+        expect(textOf(result)).toMatch(/could not be confirmed/i);
+        expect(textOf(result)).not.toMatch(/restored the original as a new entry/);
+    });
+
+    test('does not leak the failed list error into the response', async () => {
+        seedSplit();
+        mockGet.mockImplementation(async (path: string, params?: Record<string, any>) => {
+            if (path === '/entries') { throw new Error('Bearer secret-token'); }
+            return routeGet(path, params);
+        });
+
+        const result = await handleEntrySplitUndoTool({ id: '100' });
+
+        expect(textOf(result)).not.toContain('secret-token');
+    });
+
+    test('reports it could not be confirmed when the list is longer than the page cap', async () => {
+        seedSplit();
+        listLink = '<https://api.toshl.com/entries?page=1&per_page=500>; rel="next"';
+
+        const result = await handleEntrySplitUndoTool({ id: '100' });
+
+        // The restored entry is on page 0, but with more pages left the list cannot be
+        // checked completely, so nothing is claimed.
+        expect(mockGet.mock.calls.filter(([path]) => path === '/entries')).toHaveLength(3);
+        expect(textOf(result)).toContain('The split of entry 100 was undone');
+        expect(textOf(result)).toMatch(/could not be confirmed/i);
+        expect(textOf(result)).not.toMatch(/restored the original as a new entry/);
+    });
+
+    test('reports the restored entry when Toshl restores the original under its old id', async () => {
         let undone = false;
         mockGet.mockImplementation(async () => ok(undone ? PARENT : splitParent));
         mockDelete.mockImplementation(async () => { undone = true; return ok(undefined); });
@@ -332,7 +493,7 @@ describe('entry_split_undo', () => {
     });
 
     test('does not claim the restored entry kept its id when the old id still reads as split', async () => {
-        mockGet.mockResolvedValue(ok(splitParent));
+        mockGet.mockImplementation(async (path: string) => ok(path === '/entries' ? [] : splitParent));
         mockDelete.mockResolvedValue(ok(undefined));
 
         const result = await handleEntrySplitUndoTool({ id: '100' });
