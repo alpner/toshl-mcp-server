@@ -1,7 +1,22 @@
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import { createTagsClient } from '../api/endpoints/tags.js';
 import { evaluateDelete, readEntryCount } from './delete-guard.js';
+import { ToshlTag } from '../utils/types.js';
 import logger from '../utils/logger.js';
+
+/** Default page size for tag_list */
+const TAG_LIST_DEFAULT_PER_PAGE = 200;
+
+/** Toshl's documented per_page bounds for GET /tags (docs/api/tags-list.md) */
+const TAG_LIST_MIN_PER_PAGE = 10;
+const TAG_LIST_MAX_PER_PAGE = 500;
+
+/** tag_list arguments that are forwarded to Toshl as query parameters */
+const TAG_LIST_FILTERS = ['search', 'type', 'categories', 'ids', 'include_deleted'] as const;
+
+/** Where to look when Toshl reports a conflict on a tag name */
+const TAG_NAME_LOOKUP_HINT =
+    'tag_list with search set to the name finds it; include_deleted: true also lists deleted tags.';
 
 /**
  * Sets up tag tools
@@ -11,10 +26,51 @@ export function setupTagTools() {
     return [
         {
             name: 'tag_list',
-            description: 'List all tags in Toshl Finance',
+            description: 'List tags in Toshl Finance. Results are paginated: the response carries tags plus page, per_page, count and next_page; next_page is null on the last page. Tags can be filtered by name search, type, category or id, and deleted tags are included only when asked. compact returns only id, name, type, category, meta tag, deleted flag and Toshl\'s entry count, which does not include planned future entries.',
             inputSchema: {
                 type: 'object',
-                properties: {},
+                properties: {
+                    page: {
+                        type: 'integer',
+                        description: 'Zero-based page number',
+                        minimum: 0,
+                        default: 0,
+                    },
+                    per_page: {
+                        type: 'integer',
+                        description: 'Number of tags per page',
+                        minimum: TAG_LIST_MIN_PER_PAGE,
+                        maximum: TAG_LIST_MAX_PER_PAGE,
+                        default: TAG_LIST_DEFAULT_PER_PAGE,
+                    },
+                    search: {
+                        type: 'string',
+                        description: 'Search tags by name',
+                    },
+                    type: {
+                        type: 'string',
+                        description: 'Only tags of this type',
+                        enum: ['expense', 'income'],
+                    },
+                    categories: {
+                        type: 'string',
+                        description: 'Comma-separated category IDs; only tags in these categories',
+                    },
+                    ids: {
+                        type: 'string',
+                        description: 'Comma-separated tag IDs',
+                    },
+                    include_deleted: {
+                        type: 'boolean',
+                        description: 'Also return deleted tags',
+                        default: false,
+                    },
+                    compact: {
+                        type: 'boolean',
+                        description: 'Return only id, name, type, category, meta_tag, deleted and entries (Toshl\'s entry count) for each tag',
+                        default: false,
+                    },
+                },
                 required: [],
             },
         },
@@ -105,26 +161,90 @@ export function setupTagTools() {
 }
 
 /**
+ * Reduces a tag to the fields tag_list's compact mode returns, leaving out any the
+ * tag does not carry.
+ * @param tag Tag from the API
+ * @returns Compact tag
+ */
+const toCompactTag = (tag: ToshlTag): Record<string, unknown> => {
+    const compact: Record<string, unknown> = {};
+    for (const key of ['id', 'name', 'type', 'category', 'meta_tag', 'deleted']) {
+        if (tag[key] !== undefined) {
+            compact[key] = tag[key];
+        }
+    }
+
+    const entries = readEntryCount(tag);
+    if (entries !== undefined) {
+        compact.entries = entries;
+    }
+
+    return compact;
+};
+
+/**
+ * Whether an error is Toshl's 409 Conflict, as mapped by the error handler
+ * @param error Caught error
+ * @returns True for a conflict
+ */
+const isConflict = (error: unknown): boolean =>
+    error instanceof McpError && (error.data as { status?: number } | undefined)?.status === 409;
+
+/**
  * Handles the tag_list tool
+ * @param args Tool arguments
  * @returns Tool response
  */
-export async function handleTagListTool() {
-    logger.debug('Handling tag_list tool');
+export async function handleTagListTool(args: any) {
+    logger.debug('Handling tag_list tool', { args });
+
+    const input = args ?? {};
+    const page = input.page ?? 0;
+    const perPage = input.per_page ?? TAG_LIST_DEFAULT_PER_PAGE;
+    if (!Number.isInteger(page) || page < 0) {
+        return {
+            content: [{ type: 'text', text: 'Invalid parameter: page must be an integer >= 0' }],
+            isError: true,
+        };
+    }
+    if (!Number.isInteger(perPage) || perPage < TAG_LIST_MIN_PER_PAGE || perPage > TAG_LIST_MAX_PER_PAGE) {
+        return {
+            content: [{
+                type: 'text',
+                text: `Invalid parameter: per_page must be an integer between ${TAG_LIST_MIN_PER_PAGE} and ${TAG_LIST_MAX_PER_PAGE}`,
+            }],
+            isError: true,
+        };
+    }
+
+    // Only allow-listed filters reach Toshl; compact and anything unknown stay here
+    const params: Record<string, unknown> = { page, per_page: perPage };
+    for (const key of TAG_LIST_FILTERS) {
+        if (input[key] !== undefined) {
+            params[key] = input[key];
+        }
+    }
 
     try {
         const tagsClient = await createTagsClient();
-        const tags = await tagsClient.listTags();
+        const { tags, nextPage } = await tagsClient.listTagsPage(params);
 
         return {
             content: [
                 {
                     type: 'text',
-                    text: JSON.stringify(tags, null, 2),
+                    text: JSON.stringify({
+                        tags: input.compact ? tags.map(toCompactTag) : tags,
+                        page,
+                        per_page: perPage,
+                        count: tags.length,
+                        next_page: nextPage,
+                    }, null, 2),
                 },
             ],
         };
     } catch (error) {
-        logger.error('Error handling tag_list tool', { error });
+        logger.error('Error handling tag_list tool', { args, error });
 
         return {
             content: [
@@ -236,11 +356,15 @@ export async function handleTagCreateTool(args: { name: string; type: string; ca
     } catch (error) {
         logger.error('Error handling tag_create tool', { args, error });
 
+        const text = isConflict(error)
+            ? `Toshl refused to create the tag because of a conflict: a tag with this name already exists. ${TAG_NAME_LOOKUP_HINT} (${(error as Error).message})`
+            : `Error creating tag: ${(error as Error).message}`;
+
         return {
             content: [
                 {
                     type: 'text',
-                    text: `Error creating tag: ${(error as Error).message}`,
+                    text,
                 },
             ],
             isError: true,
@@ -311,11 +435,17 @@ export async function handleTagUpdateTool(args: { id: string; name?: string; typ
     } catch (error) {
         logger.error('Error handling tag_update tool', { args, error });
 
+        // Toshl documents 409 as "modified since the client last saw it", so a conflict
+        // on a rename may be that rather than a duplicate name
+        const text = isConflict(error) && args.name !== undefined
+            ? `Toshl refused to update the tag because of a conflict: either a tag with the new name already exists (${TAG_NAME_LOOKUP_HINT}), or the tag was changed elsewhere during the update. (${(error as Error).message})`
+            : `Error updating tag: ${(error as Error).message}`;
+
         return {
             content: [
                 {
                     type: 'text',
-                    text: `Error updating tag: ${(error as Error).message}`,
+                    text,
                 },
             ],
             isError: true,
@@ -406,7 +536,7 @@ export async function handleTagDeleteTool(args: { id: string; force?: boolean })
 export async function handleTagTool(toolName: string, args: any) {
     switch (toolName) {
         case 'tag_list':
-            return handleTagListTool();
+            return handleTagListTool(args);
         case 'tag_get':
             return handleTagGetTool(args as { id: string });
         case 'tag_create':

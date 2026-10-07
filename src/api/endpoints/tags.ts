@@ -1,7 +1,14 @@
 import { ToshlApiClient } from '../toshl-client.js';
-import { ToshlTag } from '../../utils/types.js';
+import { ToshlTag, ToshlTagPage } from '../../utils/types.js';
+import { parseNextPage } from '../../utils/pagination.js';
 import { assertResourceId } from '../../utils/resource-id.js';
 import logger from '../../utils/logger.js';
+
+/** Page size used when fetching every tag (Toshl's documented maximum) */
+const TAG_LIST_ALL_PER_PAGE = 500;
+
+/** Pages listAllTags fetches before it gives up rather than return a partial list */
+const TAG_LIST_MAX_PAGES = 20;
 
 /**
  * Client for the Toshl Tags API
@@ -19,14 +26,47 @@ export class TagsClient {
     }
 
     /**
-     * Gets a list of all tags
-     * @returns List of tags
+     * Gets one page of tags together with the page that follows it, if any.
+     * Toshl advertises the next page via the response's Link header.
+     * @param params Query parameters (page, per_page and filters)
+     * @returns The page of tags and the next page number, or null on the last page
      */
-    async listTags(): Promise<ToshlTag[]> {
-        logger.debug('Fetching tags list');
+    async listTagsPage(params: Record<string, any>): Promise<ToshlTagPage> {
+        logger.debug('Fetching tags page', { params });
 
-        const response = await this.client.get<ToshlTag[]>('/tags');
-        return response.data;
+        const response = await this.client.get<ToshlTag[]>('/tags', params);
+        return {
+            tags: response.data,
+            nextPage: parseNextPage(response.headers['link']),
+        };
+    }
+
+    /**
+     * Gets every tag by following the Link header page by page.
+     *
+     * Fails closed: if pages still remain after maxPages, it throws rather than
+     * return a list that silently leaves tags out.
+     *
+     * @param maxPages Maximum number of pages to fetch
+     * @returns All tags
+     */
+    async listAllTags(maxPages = TAG_LIST_MAX_PAGES): Promise<ToshlTag[]> {
+        const tags: ToshlTag[] = [];
+        let page: number | null = 0;
+
+        for (let fetched = 0; fetched < maxPages && page !== null; fetched++) {
+            const result: ToshlTagPage = await this.listTagsPage({ page, per_page: TAG_LIST_ALL_PER_PAGE });
+            tags.push(...result.tags);
+            page = result.nextPage;
+        }
+
+        if (page !== null) {
+            throw new Error(
+                `Tag list has more than ${maxPages} pages of ${TAG_LIST_ALL_PER_PAGE}; refusing to return a partial list`
+            );
+        }
+
+        return tags;
     }
 
     /**

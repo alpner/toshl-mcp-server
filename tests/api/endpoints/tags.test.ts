@@ -9,8 +9,8 @@ describe('TagsClient', () => {
         client = await createTagsClient(apiClient);
     });
 
-    test('listTags should return tags with status 200', async () => {
-        const tags = await client.listTags();
+    test('listAllTags should return tags with status 200', async () => {
+        const tags = await client.listAllTags();
 
         // Verify the response
         expect(Array.isArray(tags)).toBe(true);
@@ -26,7 +26,7 @@ describe('TagsClient', () => {
 
     test('getTag should return tag with status 200', async () => {
         // First get the list of tags to find a valid ID
-        const tags = await client.listTags();
+        const { tags } = await client.listTagsPage({ page: 0, per_page: 10 });
 
         // Skip the test if there are no tags
         if (tags.length === 0) {
