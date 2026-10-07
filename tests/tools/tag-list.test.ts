@@ -215,8 +215,9 @@ describe('tag_create conflict', () => {
         const result = await handleTagCreateTool({ name: 'coffee', type: 'expense' });
 
         expect(result.isError).toBe(true);
-        expect(result.content[0].text).toContain('a tag with this name already exists');
-        expect(result.content[0].text).toContain('include_deleted');
+        expect(result.content[0].text).toContain('a tag with this name and type already exists');
+        expect(result.content[0].text).toContain('tag_list with search');
+        expect(result.content[0].text).not.toContain('include_deleted');
         expect(result.content[0].text).toContain('Tag exists.');
     });
 
@@ -242,8 +243,10 @@ describe('tag_update conflict', () => {
         const result = await handleTagUpdateTool({ id: 'a', name: 'coffee' });
 
         expect(result.isError).toBe(true);
-        expect(result.content[0].text).toContain('a tag with the new name already exists');
+        expect(result.content[0].text).toContain('a tag with the new name and type already exists');
+        expect(result.content[0].text).not.toContain('include_deleted');
         expect(result.content[0].text).toContain('changed elsewhere');
+        expect(result.content[0].text).toContain('Tag exists.');
     });
 
     test('a 409 without a rename keeps the generic message', async () => {

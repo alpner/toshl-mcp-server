@@ -15,8 +15,7 @@ const TAG_LIST_MAX_PER_PAGE = 500;
 const TAG_LIST_FILTERS = ['search', 'type', 'categories', 'ids', 'include_deleted'] as const;
 
 /** Where to look when Toshl reports a conflict on a tag name */
-const TAG_NAME_LOOKUP_HINT =
-    'tag_list with search set to the name finds it; include_deleted: true also lists deleted tags.';
+const TAG_NAME_LOOKUP_HINT = 'tag_list with search set to the name finds it';
 
 /**
  * Sets up tag tools
@@ -357,7 +356,7 @@ export async function handleTagCreateTool(args: { name: string; type: string; ca
         logger.error('Error handling tag_create tool', { args, error });
 
         const text = isConflict(error)
-            ? `Toshl refused to create the tag because of a conflict: a tag with this name already exists. ${TAG_NAME_LOOKUP_HINT} (${(error as Error).message})`
+            ? `Toshl refused to create the tag because of a conflict: a tag with this name and type already exists. ${TAG_NAME_LOOKUP_HINT}. (${(error as Error).message})`
             : `Error creating tag: ${(error as Error).message}`;
 
         return {
@@ -438,7 +437,7 @@ export async function handleTagUpdateTool(args: { id: string; name?: string; typ
         // Toshl documents 409 as "modified since the client last saw it", so a conflict
         // on a rename may be that rather than a duplicate name
         const text = isConflict(error) && args.name !== undefined
-            ? `Toshl refused to update the tag because of a conflict: either a tag with the new name already exists (${TAG_NAME_LOOKUP_HINT}), or the tag was changed elsewhere during the update. (${(error as Error).message})`
+            ? `Toshl refused to update the tag because of a conflict: either a tag with the new name and type already exists (${TAG_NAME_LOOKUP_HINT}), or the tag was changed elsewhere during the update. (${(error as Error).message})`
             : `Error updating tag: ${(error as Error).message}`;
 
         return {
