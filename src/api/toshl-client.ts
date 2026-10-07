@@ -5,6 +5,12 @@ import { handleApiError } from '../utils/error-handler.js';
 import cache, { requestCacheKey } from '../utils/cache.js';
 import logger from '../utils/logger.js';
 
+/** A cached response body and the Link header that came with it */
+interface CachedResponse {
+    data: unknown;
+    link?: string;
+}
+
 /**
  * Base client for Toshl API
  */
@@ -62,9 +68,10 @@ export class ToshlApiClient {
                     const cacheKey = requestCacheKey('etag', response.config.method, response.config.url, response.config.params);
                     cache.set(cacheKey, etag);
 
-                    // Cache response data
+                    // Cache response data together with its Link header: Toshl leaves Link
+                    // off a 304, and pagination reads the next page from it
                     const dataKey = requestCacheKey('data', response.config.method, response.config.url, response.config.params);
-                    cache.set(dataKey, response.data);
+                    cache.set<CachedResponse>(dataKey, { data: response.data, link: response.headers['link'] });
                 }
 
                 return response;
@@ -73,16 +80,22 @@ export class ToshlApiClient {
                 // If 304 Not Modified, return cached data
                 if (error.response && error.response.status === 304) {
                     const dataKey = requestCacheKey('data', error.config.method, error.config.url, error.config.params);
-                    const cachedData = cache.get(dataKey);
+                    const cached = cache.get<CachedResponse>(dataKey);
 
-                    if (cachedData) {
+                    if (cached?.data) {
                         logger.debug('Using cached data (304 Not Modified)', { url: error.config.url });
+
+                        const headers = { ...error.response.headers };
+                        if (cached.link && !headers['link']) {
+                            headers['link'] = cached.link;
+                        }
 
                         // Create a successful response with cached data
                         return {
                             ...error.response,
                             status: 200,
-                            data: cachedData,
+                            data: cached.data,
+                            headers,
                             fromCache: true
                         };
                     }
