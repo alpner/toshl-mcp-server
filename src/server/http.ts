@@ -269,7 +269,16 @@ export async function startHttpServer(config: HttpTransportConfig): Promise<Runn
                 return;
             }
 
-            const path = new URL(req.url || '/', 'http://localhost').pathname;
+            let path: string;
+            try {
+                path = new URL(req.url || '/', 'http://localhost').pathname;
+            } catch {
+                // Node accepts absolute-form targets such as `GET http://x:99999/` that the URL
+                // parser rejects. That's the client's mistake (usually a scanner), so answer
+                // 400 and don't log it as a server error.
+                sendJsonRpcError(res, 400, -32600, 'Bad Request: malformed request target');
+                return;
+            }
 
             if (path === '/healthz' && (req.method === 'GET' || req.method === 'HEAD')) {
                 res.writeHead(200, { 'Content-Type': 'application/json' });

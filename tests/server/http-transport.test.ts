@@ -199,6 +199,19 @@ describe('Streamable HTTP transport', () => {
         expect(response.status).toBe(404);
     });
 
+    test.each(['http://x:99999/mcp', 'http://[::1/mcp'])(
+        'answers the malformed request target %s with a quiet 400',
+        async (target) => {
+            const errorSpy = jest.spyOn(logger, 'error');
+            try {
+                expect(await rawRequest(running.port, { method: 'GET', path: target })).toBe(400);
+                expect(errorSpy).not.toHaveBeenCalled();
+            } finally {
+                errorSpy.mockRestore();
+            }
+        }
+    );
+
     test('accepts a listed Origin', async () => {
         const status = await postInitialize(running.port, {
             Authorization: `Bearer ${AUTH_TOKEN}`,
