@@ -22,12 +22,17 @@ WORKDIR /app
 ENV NODE_ENV=production \
     MCP_TRANSPORT=http \
     MCP_HTTP_HOST=0.0.0.0 \
-    MCP_HTTP_PORT=3000
+    MCP_HTTP_PORT=3000 \
+    MCP_OAUTH_STATE_DIR=/app/state
 
 COPY package.json yarn.lock ./
 RUN yarn install --frozen-lockfile --ignore-scripts --production && yarn cache clean
 
 COPY --from=build /app/dist ./dist
+
+# Refresh-token hashes when the built-in OAuth server is on. Mount a volume here so
+# sign-ins survive redeploys; it must be writable by uid 1000.
+RUN mkdir -p /app/state && chown node:node /app/state && chmod 700 /app/state
 
 # The image's built-in unprivileged user.
 USER node

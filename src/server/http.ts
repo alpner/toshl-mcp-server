@@ -4,6 +4,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import logger from '../utils/logger.js';
+import { OAuthServer } from './oauth/server.js';
 import { createMcpServer } from './server.js';
 import { HttpTransportConfig } from './transport-config.js';
 
@@ -121,19 +122,24 @@ function isAllowedOrigin(req: IncomingMessage, allowedOrigins: Set<string>): boo
 }
 
 /**
- * Compares the request's bearer token with the configured one in constant time
+ * Extracts the bearer token from the Authorization header
  * @param req HTTP request
- * @param expectedDigest SHA-256 of the configured token
- * @returns Whether the request carries the configured token
+ * @returns The token, or undefined when there is no well-formed Bearer header
  */
-function hasValidBearerToken(req: IncomingMessage, expectedDigest: Buffer): boolean {
+function bearerToken(req: IncomingMessage): string | undefined {
     const match = /^Bearer[ \t]+(\S+)[ \t]*$/i.exec(req.headers.authorization || '');
-    if (!match) {
-        return false;
-    }
+    return match?.[1];
+}
 
+/**
+ * Compares a bearer token with the configured static one in constant time
+ * @param token Presented token
+ * @param expectedDigest SHA-256 of the configured token
+ * @returns Whether they match
+ */
+function matchesStaticToken(token: string, expectedDigest: Buffer): boolean {
     // Hashing first gives both sides the same length, which timingSafeEqual requires.
-    const presentedDigest = createHash('sha256').update(match[1]).digest();
+    const presentedDigest = createHash('sha256').update(token).digest();
     return timingSafeEqual(presentedDigest, expectedDigest);
 }
 
@@ -149,9 +155,11 @@ function hasValidBearerToken(req: IncomingMessage, expectedDigest: Buffer): bool
  */
 export async function startHttpServer(config: HttpTransportConfig): Promise<RunningHttpServer> {
     // Checked here as well as in loadTransportConfig, so no caller can start an open server by accident.
-    if (!config.authToken && !config.allowNoAuth) {
-        throw new Error('Refusing to serve /mcp without MCP_AUTH_TOKEN or MCP_ALLOW_NO_AUTH=true');
+    if (!config.authToken && !config.oauth && !config.allowNoAuth) {
+        throw new Error('Refusing to serve /mcp without MCP_AUTH_TOKEN, OAuth, or MCP_ALLOW_NO_AUTH=true');
     }
+
+    const oauth = config.oauth ? await OAuthServer.create(config.oauth, config.trustProxy) : undefined;
 
     const sessions = new Map<string, Session>();
     const allowedHostnames = new Set([...LOOPBACK_HOSTNAMES, ...config.allowedHosts]);
@@ -183,9 +191,18 @@ export async function startHttpServer(config: HttpTransportConfig): Promise<Runn
             return;
         }
 
-        if (expectedDigest && !hasValidBearerToken(req, expectedDigest)) {
-            sendJsonRpcError(res, 401, -32001, 'Unauthorized', { 'WWW-Authenticate': 'Bearer' });
-            return;
+        if (expectedDigest || oauth) {
+            const token = bearerToken(req);
+            const authorized =
+                token !== undefined &&
+                ((expectedDigest !== null && matchesStaticToken(token, expectedDigest)) ||
+                    (oauth !== undefined && oauth.verifyAccessToken(token)));
+            if (!authorized) {
+                // With OAuth on, the challenge points clients at discovery so they can sign in.
+                const challenge = oauth ? oauth.challenge(token !== undefined) : 'Bearer';
+                sendJsonRpcError(res, 401, -32001, 'Unauthorized', { 'WWW-Authenticate': challenge });
+                return;
+            }
         }
 
         const sessionHeader = req.headers['mcp-session-id'];
@@ -265,6 +282,18 @@ export async function startHttpServer(config: HttpTransportConfig): Promise<Runn
                 return;
             }
 
+            if (oauth?.handles(path)) {
+                // Clients call the token and revocation endpoints server-side, without Origin;
+                // a browser page gets the same Origin rule as /mcp. The sign-in form checks
+                // its own Origin.
+                if ((path === '/oauth/token' || path === '/oauth/revoke') && !isAllowedOrigin(req, allowedOrigins)) {
+                    sendJsonRpcError(res, 403, -32000, 'Forbidden: Origin not allowed');
+                    return;
+                }
+                await oauth.handle(req, res, path);
+                return;
+            }
+
             sendJsonRpcError(res, 404, -32000, 'Not found');
         } catch (error) {
             logger.error('Error handling HTTP request', {
@@ -305,11 +334,12 @@ export async function startHttpServer(config: HttpTransportConfig): Promise<Runn
         port,
         path: '/mcp',
         bearerAuth: expectedDigest !== null,
+        oauth: oauth !== undefined,
         allowedHosts: [...allowedHostnames],
         allowedOrigins: [...allowedOrigins],
     });
 
-    if (!expectedDigest) {
+    if (!expectedDigest && !oauth) {
         // Error level so no LOG_LEVEL setting short of silence can hide it.
         logger.error(
             'SECURITY WARNING: /mcp is serving WITHOUT authentication (MCP_ALLOW_NO_AUTH=true). Anything ' +
