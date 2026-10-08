@@ -3,11 +3,15 @@ import { createEntriesClient, EntriesClient } from '../api/endpoints/entries.js'
 import { createCategoriesClient } from '../api/endpoints/categories.js';
 import { ToshlEntry, ToshlImage, ToshlTransaction } from '../utils/types.js';
 import { evaluateSplitParent, evaluateSplitParts, SplitParentVerdict, SplitPartsVerdict, toCents } from './split-guard.js';
+import { matchRestoredEntry, RestoredEntryMatch } from './split-restore.js';
 import logger from '../utils/logger.js';
 
 // Toshl's documented page-size bounds for list endpoints
 const ENTRY_LIST_DEFAULT_PER_PAGE = 200;
 const ENTRY_LIST_MAX_PER_PAGE = 500;
+
+// How many pages of a day's entries are searched for the entry restored by a split undo
+const RESTORED_LOOKUP_MAX_PAGES = 3;
 
 /**
  * Sets up entry tools
@@ -475,7 +479,8 @@ export function setupEntryTools() {
             name: 'entry_split_undo',
             description: 'Undo a split in Toshl Finance. This is destructive: it deletes every child entry of the split, '
                 + 'including any changes made to them since the split, and restores the original entry. Takes the ID '
-                + 'of the split\'s parent (the original entry), not of one of its parts.',
+                + 'of the split\'s parent (the original entry), not of one of its parts. Toshl restores the original as '
+                + 'a new entry with a new ID; the response reports that ID when it can be identified.',
             inputSchema: {
                 type: 'object',
                 properties: {
@@ -1074,6 +1079,8 @@ interface SplitPart {
 
 /** What an entry_split call has written so far, for rollback and for reporting */
 interface SplitProgress {
+    /** The entry as it was read before the split began, for finding it again if the split is undone */
+    parent: ToshlEntry;
     parentId: string;
     parentCents: number;
     created: ToshlEntry[];
@@ -1160,6 +1167,49 @@ const buildSplitChild = (parent: ToshlEntry, part: SplitPart): Partial<ToshlEntr
 };
 
 /**
+ * Finds the entry Toshl restored after a split was undone. Toshl gives the restored entry a
+ * new id and nothing links it to the old one, so it is matched on what the two share among
+ * the original's account and date. Reports `none` whenever that list cannot be checked
+ * completely, so a restored entry is never named from a partial view.
+ *
+ * @param entriesClient Entries client
+ * @param original The split parent as read before the undo
+ */
+const findRestoredEntry = async (entriesClient: EntriesClient, original: ToshlEntry): Promise<RestoredEntryMatch> => {
+    const candidates: ToshlEntry[] = [];
+
+    try {
+        let page = 0;
+        for (let fetched = 0; fetched < RESTORED_LOOKUP_MAX_PAGES; fetched++) {
+            const { entries, nextPage } = await entriesClient.listEntriesPage({
+                from: original.date,
+                to: original.date,
+                accounts: original.account,
+                per_page: ENTRY_LIST_MAX_PER_PAGE,
+                page,
+            });
+
+            if (!Array.isArray(entries)) {
+                return { none: true };
+            }
+            candidates.push(...entries);
+
+            if (nextPage === null) {
+                return matchRestoredEntry(original, candidates);
+            }
+            page = nextPage;
+        }
+    } catch (error) {
+        logger.warn('Could not list entries to find the restored entry', {
+            id: original.id,
+            error: (error as Error).message,
+        });
+    }
+
+    return { none: true };
+};
+
+/**
  * Undoes a split that could not be completed or confirmed, and reports what happened.
  * Never reports success: whatever the outcome, the split the caller asked for did not happen.
  */
@@ -1201,8 +1251,17 @@ const rollBackSplit = async (entriesClient: EntriesClient, progress: SplitProgre
             + `amount until entry ${parentId} is restored with entry_split_undo or the split is completed by hand.`);
     }
 
-    return errorResult(`Splitting entry ${parentId} failed: ${reason}. The split was rolled back: its child entries `
-        + 'were deleted and the original entry was restored.');
+    const rolledBack = `Splitting entry ${parentId} failed: ${reason}. The split was rolled back: its child entries `
+        + 'were deleted and the original entry was restored';
+
+    // Toshl restores the original under a new id, so a retry on the old id would be refused.
+    const match = await findRestoredEntry(entriesClient, progress.parent);
+    if ('found' in match) {
+        return errorResult(`${rolledBack} as entry ${match.found.id}. A retry should use entry ${match.found.id}; `
+            + `entry ${parentId} stays deleted.`);
+    }
+
+    return errorResult(`${rolledBack}.`);
 };
 
 /**
@@ -1240,6 +1299,7 @@ export async function handleEntrySplitTool(args: { id: string; parts: SplitPart[
         }
 
         const progress: SplitProgress = {
+            parent,
             parentId: args.id,
             parentCents: parentVerdict.amountCents,
             created: [],
@@ -1332,8 +1392,10 @@ export async function handleEntrySplitUndoTool(args: { id: string }) {
         const childIds = (entry.split?.children ?? []).join(', ');
         await entriesClient.undoSplit(args.id);
 
-        // Whether Toshl restores the original under its old id is not documented. Only report
-        // the restored entry if the old id now reads as a live, unsplit entry.
+        // Verified against a live account on 2026-10-06: Toshl does not restore the original
+        // under its old id. That id stays deleted, with its stale split.children, and the
+        // original comes back as a new entry. If a later Toshl behaves differently and the
+        // old id reads as live and unsplit again, it is reported as the restored entry.
         let restored: ToshlEntry | undefined;
         try {
             restored = await entriesClient.getEntry(args.id);
@@ -1344,25 +1406,45 @@ export async function handleEntrySplitUndoTool(args: { id: string }) {
             });
         }
 
-        const undone = `The split of entry ${args.id} was undone: its child entries (${childIds}) were deleted and `
-            + 'the original entry was restored.';
+        const undone = `The split of entry ${args.id} was undone: its child entries (${childIds}) were deleted and `;
 
-        if (!restored || restored.deleted || hasSplitChildren(restored)) {
+        if (restored && !restored.deleted && !hasSplitChildren(restored)) {
             return {
                 content: [
                     {
                         type: 'text',
-                        text: `${undone} The restored entry's id could not be confirmed; Toshl may have given it a new id.`,
+                        text: `${undone}the original entry was restored. Restored entry:\n${JSON.stringify(restored, null, 2)}`,
                     },
                 ],
             };
         }
 
+        const match = await findRestoredEntry(entriesClient, entry);
+
+        if ('found' in match) {
+            return {
+                content: [
+                    {
+                        type: 'text',
+                        text: `${undone}Toshl restored the original as a new entry, ${match.found.id}. `
+                            + `Restored entry:\n${JSON.stringify(match.found, null, 2)}`,
+                    },
+                ],
+            };
+        }
+
+        // Several entries match: none is named, since a wrong pick would send a re-split or an
+        // edit to the wrong entry.
+        const unconfirmed = 'ambiguous' in match
+            ? `The restored entry's id could not be confirmed: entries ${match.ambiguous.join(', ')} each match the `
+                + 'original, so it could not be told which of them is the restored entry.'
+            : 'The restored entry\'s id could not be confirmed; Toshl may have given it a new id.';
+
         return {
             content: [
                 {
                     type: 'text',
-                    text: `${undone} Restored entry:\n${JSON.stringify(restored, null, 2)}`,
+                    text: `${undone}the original entry was restored. ${unconfirmed}`,
                 },
             ],
         };
