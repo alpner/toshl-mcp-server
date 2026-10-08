@@ -18,7 +18,7 @@ export async function setupTagResources(server: Server, uri: string) {
     try {
         // Handle list tags
         if (uri === 'toshl://tags/list') {
-            const tags = await tagsClient.listTags();
+            const tags = await tagsClient.listAllTags();
 
             return {
                 contents: [
