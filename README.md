@@ -130,28 +130,43 @@ MCP_TRANSPORT=http MCP_AUTH_TOKEN="$(openssl rand -hex 32)" TOSHL_API_TOKEN=your
 
 It serves:
 
-| Path | Methods | Auth | Purpose |
+| Path | Methods | Checks | Purpose |
 | --- | --- | --- | --- |
-| `/mcp` | `POST`, `GET`, `DELETE` | bearer token, if `MCP_AUTH_TOKEN` is set | MCP endpoint, one session per client |
-| `/healthz` | `GET`, `HEAD` | none | Liveness check. Returns `{"status":"ok"}` and nothing else |
+| `/mcp` | `POST`, `GET`, `DELETE` | Host, Origin, bearer token | MCP endpoint, one session per client |
+| `/healthz` | `GET`, `HEAD` | Host | Liveness check. Returns `{"status":"ok"}` and nothing else |
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `MCP_TRANSPORT` | `stdio` | `stdio` or `http` |
 | `MCP_HTTP_HOST` | `127.0.0.1` | Interface to bind |
 | `MCP_HTTP_PORT` | `3000` | Port to bind |
-| `MCP_AUTH_TOKEN` | unset | When set, `/mcp` requires `Authorization: Bearer <token>`. At least 32 characters |
+| `MCP_AUTH_TOKEN` | unset | `/mcp` requires `Authorization: Bearer <token>`. At least 32 characters. **Required** in HTTP mode unless `MCP_ALLOW_NO_AUTH=true` |
+| `MCP_ALLOW_NO_AUTH` | unset | `true` (exactly) lets HTTP mode start without `MCP_AUTH_TOKEN`. Only for a proxy that authenticates every request |
 | `MCP_ALLOWED_HOSTS` | unset | Comma-separated `Host` names accepted besides `localhost`, `127.0.0.1` and `[::1]` |
+| `MCP_ALLOWED_ORIGINS` | unset | Comma-separated origins (`https://host[:port]`) accepted in an `Origin` header on `/mcp` |
 
-**Anyone who can reach `/mcp` can read and change your Toshl data.** Keep the default
-loopback bind and put a TLS-terminating reverse proxy in front of it. Then either set
-`MCP_AUTH_TOKEN`, if your client can send a custom header, or have the proxy enforce
-authentication. Never expose `/mcp` unauthenticated, and don't count on an unguessable URL
-to protect it.
+### Security
 
-Every request's `Host` header is checked against loopback plus `MCP_ALLOWED_HOSTS`. That
-check defeats DNS rebinding, where a web page you visit points its own name at
-`127.0.0.1`. A proxy usually forwards the public name as `Host`, so list that name:
+**Anyone who can get a request through to `/mcp` can read and change your Toshl data.**
+Each layer below closes a different path to it:
+
+- **Authentication is mandatory.** In HTTP mode the server refuses to start without
+  `MCP_AUTH_TOKEN`. If your client can't send a custom header, put an authenticating
+  proxy in front and set `MCP_ALLOW_NO_AUTH=true`. The server then logs a
+  `SECURITY WARNING` at error level on every start. Never expose `/mcp` without
+  authentication, and don't count on an unguessable URL to protect it.
+- **TLS and loopback.** Keep the default loopback bind and reach the server only through
+  a TLS-terminating reverse proxy. The bearer token travels in a header, so plain HTTP
+  across a network gives it away.
+- **Host check (DNS rebinding).** Every request's `Host` must be loopback or listed in
+  `MCP_ALLOWED_HOSTS`. That stops a web page you visit from pointing its own name at
+  `127.0.0.1` and driving a local server. A proxy usually forwards the public name as
+  `Host`, so list that name.
+- **Origin check.** As the MCP spec requires, `/mcp` validates `Origin`. Requests without
+  one are accepted, because native clients, CLIs and server-side connectors don't send it.
+  A present `Origin`, including the opaque `null`, must be listed in `MCP_ALLOWED_ORIGINS`
+  or the request gets `403`, before authentication is even checked. The list is empty by
+  default, so no browser page can call `/mcp` unless you allow it.
 
 ```
 # Caddyfile: automatic TLS, forwards Host unchanged
@@ -163,6 +178,8 @@ example.com {
 ```bash
 MCP_ALLOWED_HOSTS=example.com
 ```
+
+### Sessions
 
 Sessions are held in memory. A session with no request for 30 minutes is closed, and the
 client opens a new one on its next call. `SIGTERM` and `SIGINT` close every session
@@ -183,9 +200,10 @@ docker run -d --restart unless-stopped \
     toshl-mcp-server
 ```
 
-The env file holds `TOSHL_API_TOKEN`, `MCP_AUTH_TOKEN` and `MCP_ALLOWED_HOSTS`. Make it
-readable only by its owner (`chmod 600`). `.dockerignore` keeps every `.env*` file out of
-the build context.
+The env file holds `TOSHL_API_TOKEN`, `MCP_AUTH_TOKEN` and `MCP_ALLOWED_HOSTS`. Without
+`MCP_AUTH_TOKEN` the container exits at startup unless `MCP_ALLOW_NO_AUTH=true`. Make the
+file readable only by its owner (`chmod 600`). `.dockerignore` keeps every `.env*` file
+out of the build context.
 
 ## Development
 
@@ -260,7 +278,8 @@ The server can be configured using environment variables:
 - `CACHE_TTL`: Time to live for cached data in seconds (default: 3600)
 - `CACHE_ENABLED`: Whether caching is enabled (default: true)
 - `LOG_LEVEL`: Logging level (default: info)
-- `MCP_TRANSPORT`, `MCP_HTTP_HOST`, `MCP_HTTP_PORT`, `MCP_AUTH_TOKEN`, `MCP_ALLOWED_HOSTS`:
+- `MCP_TRANSPORT`, `MCP_HTTP_HOST`, `MCP_HTTP_PORT`, `MCP_AUTH_TOKEN`, `MCP_ALLOW_NO_AUTH`,
+  `MCP_ALLOWED_HOSTS`, `MCP_ALLOWED_ORIGINS`:
   see [Remote use (Streamable HTTP)](#remote-use-streamable-http)
 
 ## License

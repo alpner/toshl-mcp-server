@@ -4,10 +4,66 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createMcpServer } from '../../src/server/server.js';
 import { RunningHttpServer, startHttpServer } from '../../src/server/http.js';
+import logger from '../../src/utils/logger.js';
 
 // Credential-free: initialize and tools/list never reach the Toshl API.
 
 const AUTH_TOKEN = 'test-token-0123456789abcdef0123456789';
+
+const INITIALIZE = JSON.stringify({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'initialize',
+    params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '0.0.0' } },
+});
+
+/**
+ * Sends a raw request; unlike fetch(), node:http lets a test set Host and Origin freely
+ * @param port Server port
+ * @param options Method, path, headers and body
+ * @returns HTTP status code
+ */
+function rawRequest(
+    port: number,
+    options: { method?: string; path?: string; headers?: Record<string, string>; body?: string }
+): Promise<number> {
+    return new Promise((resolve, reject) => {
+        const req = request(
+            {
+                host: '127.0.0.1',
+                port,
+                method: options.method ?? 'GET',
+                path: options.path ?? '/',
+                headers: options.headers,
+            },
+            (res) => {
+                res.resume();
+                resolve(res.statusCode ?? 0);
+            }
+        );
+        req.on('error', reject);
+        req.end(options.body);
+    });
+}
+
+/**
+ * POSTs an initialize request to /mcp
+ * @param port Server port
+ * @param headers Extra headers
+ * @returns HTTP status code
+ */
+function postInitialize(port: number, headers: Record<string, string>): Promise<number> {
+    return rawRequest(port, {
+        method: 'POST',
+        path: '/mcp',
+        headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json, text/event-stream',
+            ...headers,
+        },
+        body: INITIALIZE,
+    });
+}
 
 /**
  * Lists tools over an in-memory transport, the same unconnected server stdio uses
@@ -36,7 +92,9 @@ describe('Streamable HTTP transport', () => {
             host: '127.0.0.1',
             port: 0,
             authToken: AUTH_TOKEN,
+            allowNoAuth: false,
             allowedHosts: [],
+            allowedOrigins: ['https://example.com'],
         });
         baseUrl = `http://127.0.0.1:${running.port}`;
     });
@@ -139,6 +197,72 @@ describe('Streamable HTTP transport', () => {
 
         expect(response.status).toBe(404);
     });
+
+    test('accepts a listed Origin', async () => {
+        const status = await postInitialize(running.port, {
+            Authorization: `Bearer ${AUTH_TOKEN}`,
+            Origin: 'https://example.com',
+        });
+
+        expect(status).toBe(200);
+    });
+
+    test('refuses an unlisted Origin even with a valid token', async () => {
+        const status = await postInitialize(running.port, {
+            Authorization: `Bearer ${AUTH_TOKEN}`,
+            Origin: 'https://www.example.com',
+        });
+
+        expect(status).toBe(403);
+    });
+
+    test('refuses the opaque null Origin', async () => {
+        const status = await postInitialize(running.port, {
+            Authorization: `Bearer ${AUTH_TOKEN}`,
+            Origin: 'null',
+        });
+
+        expect(status).toBe(403);
+    });
+
+    test('checks Origin before auth, so a browser learns nothing about the token', async () => {
+        const status = await postInitialize(running.port, { Origin: 'https://www.example.com' });
+
+        expect(status).toBe(403);
+    });
+});
+
+describe('Streamable HTTP without MCP_AUTH_TOKEN', () => {
+    test('refuses to start unless explicitly allowed', async () => {
+        await expect(
+            startHttpServer({
+                host: '127.0.0.1',
+                port: 0,
+                allowNoAuth: false,
+                allowedHosts: [],
+                allowedOrigins: [],
+            })
+        ).rejects.toThrow('MCP_ALLOW_NO_AUTH');
+    });
+
+    test('starts with MCP_ALLOW_NO_AUTH and logs a security warning', async () => {
+        const errorSpy = jest.spyOn(logger, 'error');
+        const running = await startHttpServer({
+            host: '127.0.0.1',
+            port: 0,
+            allowNoAuth: true,
+            allowedHosts: [],
+            allowedOrigins: [],
+        });
+
+        try {
+            expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('SECURITY WARNING'), expect.anything());
+            expect(await postInitialize(running.port, {})).toBe(200);
+        } finally {
+            errorSpy.mockRestore();
+            await running.close();
+        }
+    });
 });
 
 describe('Streamable HTTP host validation', () => {
@@ -148,7 +272,10 @@ describe('Streamable HTTP host validation', () => {
         running = await startHttpServer({
             host: '127.0.0.1',
             port: 0,
+            authToken: AUTH_TOKEN,
+            allowNoAuth: false,
             allowedHosts: ['toshl-mcp.example.com'],
+            allowedOrigins: [],
         });
     });
 
@@ -156,24 +283,7 @@ describe('Streamable HTTP host validation', () => {
         await running.close();
     });
 
-    /**
-     * Sends a request with an arbitrary Host header; fetch() does not allow overriding it
-     * @param host Host header value
-     * @returns HTTP status code
-     */
-    const statusForHost = async (host: string): Promise<number> => {
-        return new Promise((resolve, reject) => {
-            const req = request(
-                { host: '127.0.0.1', port: running.port, path: '/healthz', headers: { Host: host } },
-                (res) => {
-                    res.resume();
-                    resolve(res.statusCode ?? 0);
-                }
-            );
-            req.on('error', reject);
-            req.end();
-        });
-    };
+    const statusForHost = (host: string) => rawRequest(running.port, { path: '/healthz', headers: { Host: host } });
 
     test('accepts loopback names and the configured public name', async () => {
         expect(await statusForHost(`localhost:${running.port}`)).toBe(200);

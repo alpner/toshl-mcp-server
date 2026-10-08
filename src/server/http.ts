@@ -99,6 +99,28 @@ function isAllowedHost(req: IncomingMessage, allowedHostnames: Set<string>): boo
 }
 
 /**
+ * Validates the Origin header, as the MCP Streamable HTTP spec requires servers to.
+ * Browsers attach Origin to cross-origin requests; native clients (desktop apps,
+ * CLIs, server-side connectors) send none, so a missing Origin is accepted. A
+ * present one must be listed, and an opaque `null` origin never is.
+ * @param req HTTP request
+ * @param allowedOrigins Accepted serialized origins
+ * @returns Whether the request may proceed
+ */
+function isAllowedOrigin(req: IncomingMessage, allowedOrigins: Set<string>): boolean {
+    const originHeader = req.headers.origin;
+    if (originHeader === undefined) {
+        return true;
+    }
+
+    try {
+        return allowedOrigins.has(new URL(originHeader).origin);
+    } catch {
+        return false;
+    }
+}
+
+/**
  * Compares the request's bearer token with the configured one in constant time
  * @param req HTTP request
  * @param expectedDigest SHA-256 of the configured token
@@ -123,10 +145,17 @@ function hasValidBearerToken(req: IncomingMessage, expectedDigest: Buffer): bool
  * - `GET|HEAD /healthz` — liveness only; no auth, no data
  * @param config HTTP transport configuration
  * @returns Handle exposing the bound port and a graceful close
+ * @throws Error when neither an auth token nor the explicit no-auth opt-out is configured
  */
 export async function startHttpServer(config: HttpTransportConfig): Promise<RunningHttpServer> {
+    // Checked here as well as in loadTransportConfig, so no caller can start an open server by accident.
+    if (!config.authToken && !config.allowNoAuth) {
+        throw new Error('Refusing to serve /mcp without MCP_AUTH_TOKEN or MCP_ALLOW_NO_AUTH=true');
+    }
+
     const sessions = new Map<string, Session>();
     const allowedHostnames = new Set([...LOOPBACK_HOSTNAMES, ...config.allowedHosts]);
+    const allowedOrigins = new Set(config.allowedOrigins);
     const expectedDigest = config.authToken
         ? createHash('sha256').update(config.authToken).digest()
         : null;
@@ -149,6 +178,11 @@ export async function startHttpServer(config: HttpTransportConfig): Promise<Runn
     };
 
     const handleMcp = async (req: IncomingMessage, res: ServerResponse) => {
+        if (!isAllowedOrigin(req, allowedOrigins)) {
+            sendJsonRpcError(res, 403, -32000, 'Forbidden: Origin not allowed');
+            return;
+        }
+
         if (expectedDigest && !hasValidBearerToken(req, expectedDigest)) {
             sendJsonRpcError(res, 401, -32001, 'Unauthorized', { 'WWW-Authenticate': 'Bearer' });
             return;
@@ -272,12 +306,16 @@ export async function startHttpServer(config: HttpTransportConfig): Promise<Runn
         path: '/mcp',
         bearerAuth: expectedDigest !== null,
         allowedHosts: [...allowedHostnames],
+        allowedOrigins: [...allowedOrigins],
     });
 
-    if (!expectedDigest && !LOOPBACK_HOSTNAMES.includes(config.host) && config.host !== '::1') {
-        logger.warn(
-            'Listening beyond loopback without MCP_AUTH_TOKEN. Anything that can reach this port can ' +
-                'read and change the Toshl account unless a proxy in front enforces authentication.'
+    if (!expectedDigest) {
+        // Error level so no LOG_LEVEL setting short of silence can hide it.
+        logger.error(
+            'SECURITY WARNING: /mcp is serving WITHOUT authentication (MCP_ALLOW_NO_AUTH=true). Anything ' +
+                'that can reach this port can read and change the Toshl account. This is only safe behind ' +
+                'a proxy that enforces authentication on every request.',
+            { host: config.host, port }
         );
     }
 
