@@ -76,6 +76,11 @@ async function readJsonBody(req: IncomingMessage): Promise<unknown> {
  * Checks the Host header against loopback and the configured public names.
  * This is the DNS rebinding defence: a hostile web page that rebinds its own
  * name to 127.0.0.1 still sends that name, not one of these, as Host.
+ *
+ * Same port-agnostic hostname match as the SDK's `hostHeaderValidation()`, which
+ * is Express middleware. The transport's own `allowedHosts` option is not used: it
+ * is deprecated, matches the raw header including the port, and runs only inside
+ * `handleRequest()`, after a session has already been created.
  * @param req HTTP request
  * @param allowedHostnames Accepted hostnames, lower case, without port
  * @returns Whether the request may proceed
