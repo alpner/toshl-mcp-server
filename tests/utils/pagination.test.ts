@@ -13,6 +13,24 @@ describe('parseNextPage', () => {
         expect(parseNextPage(link)).toBe(2);
     });
 
+    test('resolves the relative links Toshl actually sends', () => {
+        expect(parseNextPage('</entries?page=1>; rel="next", </entries?page=9>; rel="last"')).toBe(1);
+    });
+
+    test('resolves a relative link that carries the full query', () => {
+        const link = '</entries?from=2026-05-01&to=2026-10-06&page=1&per_page=500>; rel="next"';
+        expect(parseNextPage(link)).toBe(1);
+    });
+
+    test('copes with a header folded across lines', () => {
+        const link = '</entries?page=1>; rel="next",\n      </entries?page=9>; rel="last"';
+        expect(parseNextPage(link)).toBe(1);
+    });
+
+    test('returns null when relative links carry no next', () => {
+        expect(parseNextPage('</entries?page=0>; rel="first", </entries?page=3>; rel="last"')).toBeNull();
+    });
+
     test('returns null when there is no next link', () => {
         const link = '<https://api.toshl.com/entries?page=1>; rel="prev"';
         expect(parseNextPage(link)).toBeNull();

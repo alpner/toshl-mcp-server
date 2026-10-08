@@ -2,9 +2,15 @@
  * Pagination helpers for Toshl list endpoints.
  *
  * Toshl paginates list responses and advertises neighbouring pages through an
- * RFC 8288 `Link` header, e.g.
- *   <https://api.toshl.com/entries?from=...&page=1&per_page=200>; rel="next"
+ * RFC 8288 `Link` header whose URLs are relative, e.g.
+ *   </entries?page=1>; rel="next", </entries?page=9>; rel="last"
  */
+
+/**
+ * Base used only to parse relative `Link` references. Nothing is requested from it,
+ * and an absolute link ignores it.
+ */
+const TOSHL_LINK_BASE = 'https://api.toshl.com';
 
 /**
  * Extracts the `page` number of the `rel="next"` link from a Link header.
@@ -24,7 +30,7 @@ export const parseNextPage = (linkHeader: string | undefined): number | null => 
 
         let pageParam: string | null;
         try {
-            pageParam = new URL(match[1]).searchParams.get('page');
+            pageParam = new URL(match[1], TOSHL_LINK_BASE).searchParams.get('page');
         } catch {
             return null;
         }
