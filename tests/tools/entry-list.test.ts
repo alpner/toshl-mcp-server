@@ -32,7 +32,8 @@ describe('entry_list pagination', () => {
         const { page, per_page } = tool.inputSchema.properties;
 
         expect(page).toMatchObject({ type: 'integer', minimum: 0 });
-        expect(per_page).toMatchObject({ type: 'integer', minimum: 1, maximum: 500 });
+        expect(per_page).toMatchObject({ type: 'integer', minimum: 10, maximum: 500 });
+        expect(per_page.description).toContain('10-500');
         expect(tool.inputSchema.required).toEqual(['from', 'to']);
     });
 
@@ -47,16 +48,16 @@ describe('entry_list pagination', () => {
     test('wraps entries with pagination metadata and reports the next page', async () => {
         mockGet.mockResolvedValue(apiResponse(
             [entry('a'), entry('b')],
-            '<https://api.toshl.com/entries?from=2024-01-01&to=2024-01-31&page=1&per_page=2>; rel="next"',
+            '<https://api.toshl.com/entries?from=2024-01-01&to=2024-01-31&page=1&per_page=10>; rel="next"',
         ));
 
-        const result = await handleEntryListTool({ from: '2024-01-01', to: '2024-01-31', per_page: 2 });
+        const result = await handleEntryListTool({ from: '2024-01-01', to: '2024-01-31', per_page: 10 });
 
         expect(result.isError).toBeUndefined();
         expect(parseResult(result)).toEqual({
             entries: [entry('a'), entry('b')],
             page: 0,
-            per_page: 2,
+            per_page: 10,
             count: 2,
             next_page: 1,
         });
@@ -79,10 +80,31 @@ describe('entry_list pagination', () => {
         expect(parseResult(result)).toMatchObject({ page: 0, per_page: 200 });
     });
 
+    test.each([10, 500])('forwards the per_page bound %d unchanged', async (perPage) => {
+        mockGet.mockResolvedValue(apiResponse([]));
+
+        const result = await handleEntryListTool({ from: '2024-01-01', to: '2024-01-31', per_page: perPage });
+
+        expect(result.isError).toBeUndefined();
+        expect(mockGet).toHaveBeenCalledWith('/entries', expect.objectContaining({ per_page: perPage }));
+        expect(parseResult(result)).toMatchObject({ per_page: perPage });
+    });
+
+    // Toshl answers per_page below 10 with a bare "Invalid query parameter" 400
     test.each([
+        ['per_page below 10', { per_page: 9 }],
         ['per_page above 500', { per_page: 501 }],
-        ['per_page below 1', { per_page: 0 }],
+        ['zero per_page', { per_page: 0 }],
         ['fractional per_page', { per_page: 2.5 }],
+    ])('rejects %s with the valid range, without calling the API', async (_label, bad) => {
+        const result = await handleEntryListTool({ from: '2024-01-01', to: '2024-01-31', ...bad });
+
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toBe('Invalid parameter: per_page must be an integer between 10 and 500');
+        expect(mockGet).not.toHaveBeenCalled();
+    });
+
+    test.each([
         ['negative page', { page: -1 }],
         ['non-numeric page', { page: 'two' }],
     ])('rejects %s without calling the API', async (_label, bad) => {

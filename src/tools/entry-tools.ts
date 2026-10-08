@@ -5,8 +5,9 @@ import { ToshlEntry, ToshlImage, ToshlTransaction } from '../utils/types.js';
 import { evaluateSplitParent, evaluateSplitParts, SplitParentVerdict, SplitPartsVerdict, toCents } from './split-guard.js';
 import logger from '../utils/logger.js';
 
-// Toshl's documented page-size bounds for list endpoints
+// Toshl's documented per_page bounds for GET /entries (docs/api/entries-list.md)
 const ENTRY_LIST_DEFAULT_PER_PAGE = 200;
+const ENTRY_LIST_MIN_PER_PAGE = 10;
 const ENTRY_LIST_MAX_PER_PAGE = 500;
 
 /**
@@ -52,9 +53,9 @@ export function setupEntryTools() {
                     },
                     per_page: {
                         type: 'integer',
-                        minimum: 1,
+                        minimum: ENTRY_LIST_MIN_PER_PAGE,
                         maximum: ENTRY_LIST_MAX_PER_PAGE,
-                        description: `Entries per page, 1-${ENTRY_LIST_MAX_PER_PAGE} (default ${ENTRY_LIST_DEFAULT_PER_PAGE}).`,
+                        description: `Entries per page, ${ENTRY_LIST_MIN_PER_PAGE}-${ENTRY_LIST_MAX_PER_PAGE} (default ${ENTRY_LIST_DEFAULT_PER_PAGE}).`,
                     },
                     from: {
                         type: 'string',
@@ -518,11 +519,11 @@ export async function handleEntryListTool(args: any) {
             isError: true,
         };
     }
-    if (!Number.isInteger(perPage) || perPage < 1 || perPage > ENTRY_LIST_MAX_PER_PAGE) {
+    if (!Number.isInteger(perPage) || perPage < ENTRY_LIST_MIN_PER_PAGE || perPage > ENTRY_LIST_MAX_PER_PAGE) {
         return {
             content: [{
                 type: 'text',
-                text: `Invalid parameter: per_page must be an integer between 1 and ${ENTRY_LIST_MAX_PER_PAGE}`,
+                text: `Invalid parameter: per_page must be an integer between ${ENTRY_LIST_MIN_PER_PAGE} and ${ENTRY_LIST_MAX_PER_PAGE}`,
             }],
             isError: true,
         };
