@@ -93,6 +93,7 @@ describe('Streamable HTTP transport', () => {
             port: 0,
             authToken: AUTH_TOKEN,
             allowNoAuth: false,
+            trustProxy: false,
             allowedHosts: [],
             allowedOrigins: ['https://example.com'],
         });
@@ -252,6 +253,7 @@ describe('Streamable HTTP without MCP_AUTH_TOKEN', () => {
                 host: '127.0.0.1',
                 port: 0,
                 allowNoAuth: false,
+                trustProxy: false,
                 allowedHosts: [],
                 allowedOrigins: [],
             })
@@ -264,6 +266,7 @@ describe('Streamable HTTP without MCP_AUTH_TOKEN', () => {
             host: '127.0.0.1',
             port: 0,
             allowNoAuth: true,
+            trustProxy: false,
             allowedHosts: [],
             allowedOrigins: [],
         });
@@ -287,6 +290,7 @@ describe('Streamable HTTP host validation', () => {
             port: 0,
             authToken: AUTH_TOKEN,
             allowNoAuth: false,
+            trustProxy: false,
             allowedHosts: ['toshl-mcp.example.com'],
             allowedOrigins: [],
         });
