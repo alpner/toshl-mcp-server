@@ -1,5 +1,5 @@
 import { ToshlApiClient } from '../toshl-client.js';
-import { ToshlEntry, ToshlEntryPage, ToshlEntrySum, ToshlTimelineItem } from '../../utils/types.js';
+import { ToshlEntry, ToshlEntryPage, ToshlEntrySum, ToshlRepeat, ToshlTimelineItem } from '../../utils/types.js';
 import { parseNextPage } from '../../utils/pagination.js';
 import { assertResourceId } from '../../utils/resource-id.js';
 import logger from '../../utils/logger.js';
@@ -94,10 +94,21 @@ export class EntriesClient {
         const existingEntry = await this.getEntry(id);
 
         // Merge the changes with the existing entry
-        const updatedEntry = {
+        const updatedEntry: Partial<ToshlEntry> = {
             ...existingEntry,
             ...entry
         };
+
+        // A repeat change refines the entry's current series rather than replacing it, so the
+        // series id and iteration survive. An entry that is not repeating yet starts on its own date
+        // with interval 1, and needs a frequency because there is no series to inherit one from.
+        if (entry.repeat) {
+            const currentRepeat: Partial<ToshlRepeat> = existingEntry.repeat ?? { start: existingEntry.date, interval: 1 };
+            if (!existingEntry.repeat && !entry.repeat.frequency) {
+                throw new Error('repeat.frequency is required to make a non-repeating entry repeat');
+            }
+            updatedEntry.repeat = { ...currentRepeat, ...entry.repeat } as ToshlRepeat;
+        }
 
         // Make sure all required fields are present
         if (!updatedEntry.amount || !updatedEntry.currency || !updatedEntry.date ||

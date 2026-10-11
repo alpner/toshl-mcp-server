@@ -4,6 +4,7 @@ import { createCategoriesClient } from '../api/endpoints/categories.js';
 import { ToshlEntry, ToshlImage, ToshlTransaction } from '../utils/types.js';
 import { evaluateSplitParent, evaluateSplitParts, SplitParentVerdict, SplitPartsVerdict, toCents } from './split-guard.js';
 import { matchRestoredEntry, RestoredEntryMatch } from './split-restore.js';
+import { normalizeRepeat, REPEAT_INPUT_SCHEMA } from './repeat.js';
 import logger from '../utils/logger.js';
 
 // Toshl's documented per_page bounds for GET /entries (docs/api/entries-list.md)
@@ -269,7 +270,7 @@ export function setupEntryTools() {
         },
         {
             name: 'entry_create',
-            description: 'Create a new entry in Toshl Finance. To create a transfer between accounts, include a transaction object with the destination account ID and currency.',
+            description: 'Create a new entry in Toshl Finance. To create a transfer between accounts, include a transaction object with the destination account ID and currency. Include a repeat object to create a repeating entry.',
             inputSchema: {
                 type: 'object',
                 properties: {
@@ -341,13 +342,14 @@ export function setupEntryTools() {
                         },
                         required: ['account', 'currency'],
                     },
+                    repeat: REPEAT_INPUT_SCHEMA,
                 },
                 required: ['amount', 'currency', 'date', 'account', 'category'],
             },
         },
         {
             name: 'entry_update',
-            description: 'Update an existing entry in Toshl Finance',
+            description: 'Update an existing entry in Toshl Finance. A repeat object makes the entry repeat, or changes the series it already belongs to.',
             inputSchema: {
                 type: 'object',
                 properties: {
@@ -401,6 +403,7 @@ export function setupEntryTools() {
                             type: 'string',
                         },
                     },
+                    repeat: REPEAT_INPUT_SCHEMA,
                     updateMode: {
                         type: 'string',
                         description: 'Update mode for repeating entries (all, one, tail)',
@@ -742,9 +745,26 @@ export async function handleEntryCreateTool(args: any) {
         };
     }
 
+    const entryData = { ...args };
+    if (args.repeat !== undefined) {
+        const repeat = normalizeRepeat(args.repeat, { defaultStart: args.date });
+        if (!repeat.ok) {
+            return {
+                content: [
+                    {
+                        type: 'text',
+                        text: `Invalid repeat: ${repeat.error}`,
+                    },
+                ],
+                isError: true,
+            };
+        }
+        entryData.repeat = repeat.repeat;
+    }
+
     try {
         const entriesClient = await createEntriesClient();
-        const entry = await entriesClient.createEntry(args);
+        const entry = await entriesClient.createEntry(entryData);
 
         return {
             content: [
@@ -790,11 +810,27 @@ export async function handleEntryUpdateTool(args: any) {
         };
     }
 
+    // Extract id and updateMode from args
+    const { id, updateMode, ...entryData } = args;
+
+    if (entryData.repeat !== undefined) {
+        const repeat = normalizeRepeat(entryData.repeat, { partial: true });
+        if (!repeat.ok) {
+            return {
+                content: [
+                    {
+                        type: 'text',
+                        text: `Invalid repeat: ${repeat.error}`,
+                    },
+                ],
+                isError: true,
+            };
+        }
+        entryData.repeat = repeat.repeat;
+    }
+
     try {
         const entriesClient = await createEntriesClient();
-
-        // Extract id and updateMode from args
-        const { id, updateMode, ...entryData } = args;
 
         // Update the entry
         const entry = await entriesClient.updateEntry(id, entryData, updateMode);
