@@ -67,11 +67,6 @@ describe('normalizeRepeat', () => {
         expect(result.error).toContain('repeat.start');
     });
 
-    test('partial mode accepts a change that names only some fields', () => {
-        expect(normalizeRepeat({ end: '2027-01-01' }, { partial: true }))
-            .toEqual({ ok: true, repeat: { end: '2027-01-01' } });
-    });
-
     test('rejects a non-object', () => {
         expect(normalizeRepeat('monthly', {}).ok).toBe(false);
         expect(normalizeRepeat(null, {}).ok).toBe(false);
@@ -146,21 +141,16 @@ describe('normalizeRepeat by-rules', () => {
 });
 
 describe('tool schemas', () => {
-    test('entry_create and entry_update both advertise repeat', () => {
-        const tools = setupEntryTools();
-        for (const name of ['entry_create', 'entry_update']) {
-            const tool = tools.find((t: any) => t.name === name);
-            expect(tool.inputSchema.properties.repeat.properties.frequency.enum)
-                .toEqual(['daily', 'weekly', 'monthly', 'yearly']);
-        }
+    test('entry_create advertises an optional repeat', () => {
+        const tool = setupEntryTools().find((t: any) => t.name === 'entry_create');
+        expect(tool.inputSchema.properties.repeat.properties.frequency.enum)
+            .toEqual(['daily', 'weekly', 'monthly', 'yearly']);
+        expect(tool.inputSchema.required).not.toContain('repeat');
     });
 
-    test('repeat is optional on both tools', () => {
-        const tools = setupEntryTools();
-        for (const name of ['entry_create', 'entry_update']) {
-            const tool = tools.find((t: any) => t.name === name);
-            expect(tool.inputSchema.required).not.toContain('repeat');
-        }
+    test('entry_update does not advertise repeat', () => {
+        const tool = setupEntryTools().find((t: any) => t.name === 'entry_update');
+        expect(tool.inputSchema.properties).not.toHaveProperty('repeat');
     });
 });
 
@@ -198,54 +188,27 @@ describe('entry_create with repeat', () => {
     });
 });
 
-describe('entry_update with repeat', () => {
+describe('entry_update and repeat', () => {
     beforeEach(() => {
         mockGet.mockReset();
-        mockPost.mockReset();
         mockPut.mockReset();
-        mockPut.mockResolvedValue(ok({ ...REPEATING_ENTRY }));
+        mockPut.mockResolvedValue(ok({ ...PLAIN_ENTRY }));
     });
 
-    test('turns a plain entry into a repeating one starting on its own date', async () => {
-        mockGet.mockResolvedValue(ok(PLAIN_ENTRY));
-
-        const result = await handleEntryUpdateTool({ id: '100', repeat: { frequency: 'monthly', interval: 1 } });
-
-        expect(result.isError).toBeUndefined();
-        expect(mockPut.mock.calls[0][1].repeat).toEqual({ start: '2026-10-10', frequency: 'monthly', interval: 1 });
-    });
-
-    test('a plain entry made repeating defaults interval to 1', async () => {
-        mockGet.mockResolvedValue(ok(PLAIN_ENTRY));
-
-        await handleEntryUpdateTool({ id: '100', repeat: { frequency: 'weekly' } });
-
-        expect(mockPut.mock.calls[0][1].repeat).toEqual({ start: '2026-10-10', frequency: 'weekly', interval: 1 });
-    });
-
-    test('a plain entry cannot be made repeating without a frequency', async () => {
-        mockGet.mockResolvedValue(ok(PLAIN_ENTRY));
-
-        const result = await handleEntryUpdateTool({ id: '100', repeat: { end: '2027-06-11' } });
+    test('a repeat sent to entry_update is rejected before anything is read or written', async () => {
+        const result = await handleEntryUpdateTool({
+            id: '100', desc: 'Spotify Family', repeat: { frequency: 'monthly', interval: 1, start: '2026-10-10' },
+        });
 
         expect(result.isError).toBe(true);
-        expect(result.content[0].text).toContain('repeat.frequency is required');
+        expect(result.content[0].text).toBe('repeat cannot be changed through entry_update: '
+            + 'Toshl\'s PUT schema marks every repeat field readonly. Create a new repeating series with entry_create.');
+        expect(mockGet).not.toHaveBeenCalled();
         expect(mockPut).not.toHaveBeenCalled();
     });
 
-    test('a partial change keeps the series id and iteration', async () => {
-        mockGet.mockResolvedValue(ok(REPEATING_ENTRY));
-
-        await handleEntryUpdateTool({ id: '100', repeat: { end: '2027-06-11' }, updateMode: 'tail' });
-
-        expect(mockPut.mock.calls[0][1].repeat).toEqual({
-            id: '9', start: '2026-09-11', frequency: 'monthly', interval: 1, iteration: 3, template: false, end: '2027-06-11',
-        });
-        expect(mockPut.mock.calls[0][2]).toEqual({ update: 'tail' });
-    });
-
-    test('refuses an invalid repeat before anything is written', async () => {
-        const result = await handleEntryUpdateTool({ id: '100', repeat: { interval: 500 } });
+    test('a repeat change on a repeating entry is rejected even with an updateMode', async () => {
+        const result = await handleEntryUpdateTool({ id: '100', repeat: { frequency: 'weekly', count: 2 }, updateMode: 'one' });
 
         expect(result.isError).toBe(true);
         expect(mockGet).not.toHaveBeenCalled();
@@ -259,85 +222,5 @@ describe('entry_update with repeat', () => {
 
         expect(mockPut.mock.calls[0][1].repeat).toEqual(REPEATING_ENTRY.repeat);
         expect(mockPut.mock.calls[0][1].desc).toBe('Spotify Family');
-    });
-});
-
-describe('entry_update repeat end and count', () => {
-    const COUNTED_ENTRY = { ...REPEATING_ENTRY, repeat: { ...REPEATING_ENTRY.repeat, count: 12 } };
-    const ENDED_ENTRY = { ...REPEATING_ENTRY, repeat: { ...REPEATING_ENTRY.repeat, end: '2027-09-11' } };
-
-    beforeEach(() => {
-        mockGet.mockReset();
-        mockPut.mockReset();
-        mockPut.mockResolvedValue(ok({ ...REPEATING_ENTRY }));
-    });
-
-    test('an end replaces the series count', async () => {
-        mockGet.mockResolvedValue(ok(COUNTED_ENTRY));
-
-        await handleEntryUpdateTool({ id: '100', repeat: { end: '2027-06-11' }, updateMode: 'all' });
-
-        const repeat = mockPut.mock.calls[0][1].repeat;
-        expect(repeat.end).toBe('2027-06-11');
-        expect(repeat).not.toHaveProperty('count');
-    });
-
-    test('a count replaces the series end', async () => {
-        mockGet.mockResolvedValue(ok(ENDED_ENTRY));
-
-        await handleEntryUpdateTool({ id: '100', repeat: { count: 6 }, updateMode: 'all' });
-
-        const repeat = mockPut.mock.calls[0][1].repeat;
-        expect(repeat.count).toBe(6);
-        expect(repeat).not.toHaveProperty('end');
-    });
-
-    test('a change that sends neither keeps the series count', async () => {
-        mockGet.mockResolvedValue(ok(COUNTED_ENTRY));
-
-        await handleEntryUpdateTool({ id: '100', repeat: { interval: 2 }, updateMode: 'all' });
-
-        const repeat = mockPut.mock.calls[0][1].repeat;
-        expect(repeat).toMatchObject({ interval: 2, count: 12 });
-        expect(repeat).not.toHaveProperty('end');
-    });
-});
-
-describe('entry_update repeat change scope', () => {
-    beforeEach(() => {
-        mockGet.mockReset();
-        mockPut.mockReset();
-        mockPut.mockResolvedValue(ok({ ...REPEATING_ENTRY }));
-    });
-
-    test('a repeat change on a repeating entry without updateMode is refused before the PUT', async () => {
-        mockGet.mockResolvedValue(ok(REPEATING_ENTRY));
-
-        const result = await handleEntryUpdateTool({ id: '100', repeat: { interval: 2 } });
-
-        expect(result.isError).toBe(true);
-        expect(result.content[0].text).toContain('updateMode is required');
-        expect(result.content[0].text).toContain('one, tail or all');
-        expect(result.content[0].text).toContain('all entries in the series');
-        expect(mockPut).not.toHaveBeenCalled();
-    });
-
-    test('making a plain entry repeat needs no updateMode', async () => {
-        mockGet.mockResolvedValue(ok(PLAIN_ENTRY));
-
-        const result = await handleEntryUpdateTool({ id: '100', repeat: { frequency: 'monthly' } });
-
-        expect(result.isError).toBeUndefined();
-        expect(mockPut).toHaveBeenCalledTimes(1);
-        expect(mockPut.mock.calls[0][2]).toEqual({});
-    });
-
-    test.each(['one', 'tail', 'all'])('a repeat change with updateMode %s goes through', async (updateMode) => {
-        mockGet.mockResolvedValue(ok(REPEATING_ENTRY));
-
-        const result = await handleEntryUpdateTool({ id: '100', repeat: { interval: 2 }, updateMode });
-
-        expect(result.isError).toBeUndefined();
-        expect(mockPut.mock.calls[0][2]).toEqual({ update: updateMode });
     });
 });

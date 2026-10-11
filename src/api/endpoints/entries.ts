@@ -1,5 +1,5 @@
 import { ToshlApiClient } from '../toshl-client.js';
-import { ToshlEntry, ToshlEntryPage, ToshlEntrySum, ToshlRepeat, ToshlTimelineItem } from '../../utils/types.js';
+import { ToshlEntry, ToshlEntryPage, ToshlEntrySum, ToshlTimelineItem } from '../../utils/types.js';
 import { parseNextPage } from '../../utils/pagination.js';
 import { assertResourceId } from '../../utils/resource-id.js';
 import logger from '../../utils/logger.js';
@@ -94,35 +94,10 @@ export class EntriesClient {
         const existingEntry = await this.getEntry(id);
 
         // Merge the changes with the existing entry
-        const updatedEntry: Partial<ToshlEntry> = {
+        const updatedEntry = {
             ...existingEntry,
             ...entry
         };
-
-        // A repeat change refines the entry's current series rather than replacing it, so the
-        // series id and iteration survive. An entry that is not repeating yet starts on its own date
-        // with interval 1, and needs a frequency because there is no series to inherit one from.
-        if (entry.repeat) {
-            const currentRepeat: Partial<ToshlRepeat> = existingEntry.repeat ?? { start: existingEntry.date, interval: 1 };
-            if (!existingEntry.repeat && !entry.repeat.frequency) {
-                throw new Error('repeat.frequency is required to make a non-repeating entry repeat');
-            }
-            // Toshl applies a series change to every entry in it unless told otherwise, so the scope
-            // of a repeat change on an existing series has to be chosen explicitly.
-            if (existingEntry.repeat && updateMode === undefined) {
-                throw new Error('updateMode is required to change the repeat of a repeating entry: '
-                    + 'one, tail or all. Without it Toshl applies the change to all entries in the series.');
-            }
-            // The cast covers a new series, which has no id until Toshl assigns one
-            const mergedRepeat = { ...currentRepeat, ...entry.repeat } as ToshlRepeat;
-            // end and count are mutually exclusive, so whichever the caller sets replaces the other
-            if (entry.repeat.end !== undefined) {
-                delete mergedRepeat.count;
-            } else if (entry.repeat.count !== undefined) {
-                delete mergedRepeat.end;
-            }
-            updatedEntry.repeat = mergedRepeat;
-        }
 
         // Make sure all required fields are present
         if (!updatedEntry.amount || !updatedEntry.currency || !updatedEntry.date ||

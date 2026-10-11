@@ -24,15 +24,15 @@ export type RepeatResult =
     | { ok: false; error: string };
 
 /**
- * JSON schema of the repeat property shared by entry_create and entry_update
+ * JSON schema of entry_create's repeat property. Toshl accepts a repeat only when an entry is
+ * created: its PUT schema marks every repeat field readonly.
  */
 export const REPEAT_INPUT_SCHEMA = {
     type: 'object',
     description: 'Makes the entry repeat, following RFC 5545 RRULE semantics. '
         + 'Repeating every two months is frequency monthly with interval 2. '
         + 'A series ends at end or after count repetitions; the two are mutually exclusive, and with neither it repeats without an end date. '
-        + 'On entry_create, start defaults to the entry date and interval to 1. '
-        + 'On entry_update, the given fields are merged into the existing series, and an end or count given replaces the other.',
+        + 'When omitted, start is the entry date and interval is 1.',
     properties: {
         frequency: {
             type: 'string',
@@ -115,12 +115,10 @@ const isPlainObject = (value: unknown): value is Record<string, unknown> =>
  * Validates a repeat object from tool input and returns only the fields Toshl accepts.
  * @param input Raw repeat argument
  * @param options.defaultStart Start date used when none is given (the entry's own date)
- * @param options.partial When true the repeat is a set of changes to an existing series,
- *                        so frequency is not required and interval is not defaulted
  */
 export const normalizeRepeat = (
     input: unknown,
-    options: { defaultStart?: string; partial?: boolean } = {},
+    options: { defaultStart?: string } = {},
 ): RepeatResult => {
     if (!isPlainObject(input)) {
         return { ok: false, error: 'repeat must be an object' };
@@ -128,14 +126,13 @@ export const normalizeRepeat = (
 
     const repeat: RepeatInput = {};
 
-    if (input.frequency !== undefined) {
-        if (!(REPEAT_FREQUENCIES as readonly unknown[]).includes(input.frequency)) {
-            return { ok: false, error: `repeat.frequency must be one of: ${REPEAT_FREQUENCIES.join(', ')}` };
-        }
-        repeat.frequency = input.frequency as RepeatInput['frequency'];
-    } else if (!options.partial) {
+    if (input.frequency === undefined) {
         return { ok: false, error: 'repeat.frequency is required' };
     }
+    if (!(REPEAT_FREQUENCIES as readonly unknown[]).includes(input.frequency)) {
+        return { ok: false, error: `repeat.frequency must be one of: ${REPEAT_FREQUENCIES.join(', ')}` };
+    }
+    repeat.frequency = input.frequency as RepeatInput['frequency'];
 
     if (input.interval !== undefined) {
         const interval = input.interval;
@@ -144,19 +141,18 @@ export const normalizeRepeat = (
             return { ok: false, error: `repeat.interval must be an integer from ${REPEAT_INTERVAL_MIN} to ${REPEAT_INTERVAL_MAX}` };
         }
         repeat.interval = interval;
-    } else if (!options.partial) {
+    } else {
         repeat.interval = REPEAT_INTERVAL_MIN;
     }
 
-    const start = input.start ?? (options.partial ? undefined : options.defaultStart);
-    if (start !== undefined) {
-        if (typeof start !== 'string' || !DATE_PATTERN.test(start)) {
-            return { ok: false, error: 'repeat.start must be a date in YYYY-MM-DD format' };
-        }
-        repeat.start = start;
-    } else if (!options.partial) {
+    const start = input.start ?? options.defaultStart;
+    if (start === undefined) {
         return { ok: false, error: 'repeat.start is required when the entry has no date to start from' };
     }
+    if (typeof start !== 'string' || !DATE_PATTERN.test(start)) {
+        return { ok: false, error: 'repeat.start must be a date in YYYY-MM-DD format' };
+    }
+    repeat.start = start;
 
     if (input.end !== undefined) {
         if (typeof input.end !== 'string' || !DATE_PATTERN.test(input.end)) {

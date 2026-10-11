@@ -270,7 +270,7 @@ export function setupEntryTools() {
         },
         {
             name: 'entry_create',
-            description: 'Create a new entry in Toshl Finance. To create a transfer between accounts, include a transaction object with the destination account ID and currency. Include a repeat object to create a repeating entry.',
+            description: 'Create a new entry in Toshl Finance. To create a transfer between accounts, include a transaction object with the destination account ID and currency. A repeat object creates a repeating entry.',
             inputSchema: {
                 type: 'object',
                 properties: {
@@ -349,7 +349,8 @@ export function setupEntryTools() {
         },
         {
             name: 'entry_update',
-            description: 'Update an existing entry in Toshl Finance. A repeat object makes the entry repeat, or changes the series it already belongs to.',
+            description: 'Update an existing entry in Toshl Finance. The repeat of an existing entry cannot be changed through this tool; '
+                + 'a new repeating series is created with entry_create.',
             inputSchema: {
                 type: 'object',
                 properties: {
@@ -403,12 +404,10 @@ export function setupEntryTools() {
                             type: 'string',
                         },
                     },
-                    repeat: REPEAT_INPUT_SCHEMA,
                     updateMode: {
                         type: 'string',
                         description: 'Update mode for repeating entries (all, one, tail). '
-                            + 'When omitted, Toshl uses all, which applies the update to every entry in the series. '
-                            + 'Required when the update changes the repeat of an entry that already repeats.',
+                            + 'When omitted, Toshl uses all, which applies the update to every entry in the series.',
                         enum: ['all', 'one', 'tail'],
                     },
                 },
@@ -812,27 +811,25 @@ export async function handleEntryUpdateTool(args: any) {
         };
     }
 
-    // Extract id and updateMode from args
-    const { id, updateMode, ...entryData } = args;
-
-    if (entryData.repeat !== undefined) {
-        const repeat = normalizeRepeat(entryData.repeat, { partial: true });
-        if (!repeat.ok) {
-            return {
-                content: [
-                    {
-                        type: 'text',
-                        text: `Invalid repeat: ${repeat.error}`,
-                    },
-                ],
-                isError: true,
-            };
-        }
-        entryData.repeat = repeat.repeat;
+    // Toshl ignores a repeat on update, so refuse it rather than report a change that did not happen
+    if (args.repeat !== undefined) {
+        return {
+            content: [
+                {
+                    type: 'text',
+                    text: 'repeat cannot be changed through entry_update: Toshl\'s PUT schema marks every repeat field readonly. '
+                        + 'Create a new repeating series with entry_create.',
+                },
+            ],
+            isError: true,
+        };
     }
 
     try {
         const entriesClient = await createEntriesClient();
+
+        // Extract id and updateMode from args
+        const { id, updateMode, ...entryData } = args;
 
         // Update the entry
         const entry = await entriesClient.updateEntry(id, entryData, updateMode);
