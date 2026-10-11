@@ -74,6 +74,40 @@ export const REPEAT_INPUT_SCHEMA = {
     },
 };
 
+const BYDAY_ITEM_PATTERN = /^[+-]?\d{0,2}(MO|TU|WE|TH|FR|SA|SU)$/;
+const SIGNED_INTEGER_PATTERN = /^[+-]?\d+$/;
+
+/**
+ * Accepts an optionally signed integer whose absolute value is within [min, max]
+ */
+const isSignedIntegerInRange = (item: string, min: number, max: number): boolean => {
+    if (!SIGNED_INTEGER_PATTERN.test(item)) {
+        return false;
+    }
+    const magnitude = Math.abs(Number(item));
+    return magnitude >= min && magnitude <= max;
+};
+
+// Per-item rules for the comma separated RRULE parts (RFC 5545 section 3.3.10). bysetpos is
+// kept as permissive as the RFC (up to 366) so Toshl, not this server, has the final say.
+const BY_RULES = {
+    byday: {
+        isValid: (item: string) => BYDAY_ITEM_PATTERN.test(item),
+        expected: 'comma separated weekdays (MO-SU), each optionally preceded by a signed position',
+        example: 'MO,WE or 1MO or -1FR',
+    },
+    bymonthday: {
+        isValid: (item: string) => isSignedIntegerInRange(item, 1, 31),
+        expected: 'comma separated days of the month, each an optionally signed integer from 1 to 31',
+        example: '1,15 or -1',
+    },
+    bysetpos: {
+        isValid: (item: string) => isSignedIntegerInRange(item, 1, 366),
+        expected: 'comma separated nonzero integers, each optionally signed, up to 366',
+        example: '-1',
+    },
+} as const;
+
 const isPlainObject = (value: unknown): value is Record<string, unknown> =>
     typeof value === 'object' && value !== null && !Array.isArray(value);
 
@@ -145,10 +179,12 @@ export const normalizeRepeat = (
     for (const key of ['byday', 'bymonthday', 'bysetpos'] as const) {
         const value = input[key];
         if (value !== undefined) {
-            if (typeof value !== 'string' || value.trim() === '') {
-                return { ok: false, error: `repeat.${key} must be a non-empty string` };
+            const rule = BY_RULES[key];
+            const items = typeof value === 'string' ? value.split(',').map((item) => item.trim()) : [];
+            if (items.length === 0 || !items.every((item) => item !== '' && rule.isValid(item))) {
+                return { ok: false, error: `repeat.${key} must be ${rule.expected}, for example ${rule.example}` };
             }
-            repeat[key] = value;
+            repeat[key] = items.join(',');
         }
     }
 

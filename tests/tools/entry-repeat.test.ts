@@ -79,6 +79,72 @@ describe('normalizeRepeat', () => {
     });
 });
 
+describe('normalizeRepeat by-rules', () => {
+    const MONTHLY = { frequency: 'monthly', start: '2026-10-31' };
+
+    test.each([
+        ['byday', 'MO'],
+        ['byday', '1MO'],
+        ['byday', '-1MO'],
+        ['byday', 'MO,WE,FR'],
+        ['byday', '+2TU,-10SU'],
+        ['bymonthday', '1'],
+        ['bymonthday', '-1'],
+        ['bymonthday', '+31'],
+        ['bymonthday', '1,15'],
+        ['bysetpos', '-1'],
+        ['bysetpos', '366'],
+        ['bysetpos', '1,-1'],
+    ])('accepts %s %s', (key, value) => {
+        const result = normalizeRepeat({ ...MONTHLY, [key]: value }, {});
+        expect(result).toEqual({ ok: true, repeat: expect.objectContaining({ [key]: value }) });
+    });
+
+    test('accepts the last day of the month', () => {
+        const result = normalizeRepeat({ ...MONTHLY, bymonthday: '28,29,30,31', bysetpos: '-1' }, {});
+        expect(result).toEqual({
+            ok: true,
+            repeat: expect.objectContaining({ bymonthday: '28,29,30,31', bysetpos: '-1' }),
+        });
+    });
+
+    test('trims spaces around items', () => {
+        const result = normalizeRepeat({ ...MONTHLY, byday: 'MO, WE ,FR' }, {});
+        expect(result.repeat.byday).toBe('MO,WE,FR');
+    });
+
+    test.each([
+        ['byday', 'MO;XX'],
+        ['byday', 'XX'],
+        ['byday', 'mo'],
+        ['byday', '1MO,'],
+        ['byday', '100MO'],
+        ['byday', ''],
+        ['bymonthday', '32'],
+        ['bymonthday', '0'],
+        ['bymonthday', '-32'],
+        ['bymonthday', '1.5'],
+        ['bymonthday', '1,,2'],
+        ['bymonthday', ''],
+        ['bysetpos', '0'],
+        ['bysetpos', '367'],
+        ['bysetpos', 'last'],
+        ['bysetpos', '-1,'],
+        ['bysetpos', ''],
+    ])('rejects %s %j', (key, value) => {
+        const result = normalizeRepeat({ ...MONTHLY, [key]: value }, {});
+        expect(result.ok).toBe(false);
+        expect(result.error).toContain(`repeat.${key} must be`);
+        expect(result.error).toContain('for example');
+    });
+
+    test('rejects a by-rule that is not a string', () => {
+        const result = normalizeRepeat({ ...MONTHLY, bymonthday: 15 }, {});
+        expect(result.ok).toBe(false);
+        expect(result.error).toContain('repeat.bymonthday');
+    });
+});
+
 describe('tool schemas', () => {
     test('entry_create and entry_update both advertise repeat', () => {
         const tools = setupEntryTools();
