@@ -270,7 +270,8 @@ export function setupEntryTools() {
         },
         {
             name: 'entry_create',
-            description: 'Create a new entry in Toshl Finance. To create a transfer between accounts, include a transaction object with the destination account ID and currency. A repeat object creates a repeating entry.',
+            description: 'Create a new entry in Toshl Finance. To create a transfer between accounts, include a transaction object with the destination account ID and currency. A repeat object creates a repeating entry; '
+                + 'with neither end nor count in it, the series has no end date.',
             inputSchema: {
                 type: 'object',
                 properties: {

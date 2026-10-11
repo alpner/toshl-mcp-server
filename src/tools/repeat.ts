@@ -31,7 +31,7 @@ export const REPEAT_INPUT_SCHEMA = {
     type: 'object',
     description: 'Makes the entry repeat, following RFC 5545 RRULE semantics. '
         + 'Repeating every two months is frequency monthly with interval 2. '
-        + 'A series ends at end or after count repetitions; the two are mutually exclusive, and with neither it repeats without an end date. '
+        + 'A series ends at end or after count repetitions; the two are mutually exclusive, and with neither the series has no end date. '
         + 'When omitted, start is the entry date and interval is 1.',
     properties: {
         frequency: {
@@ -145,14 +145,19 @@ export const normalizeRepeat = (
         repeat.interval = REPEAT_INTERVAL_MIN;
     }
 
-    const start = input.start ?? options.defaultStart;
-    if (start === undefined) {
-        return { ok: false, error: 'repeat.start is required when the entry has no date to start from' };
+    if (input.start === undefined) {
+        // The entry's own date is the default start, so a bad entry date is reported as such
+        const entryDate = options.defaultStart;
+        if (typeof entryDate !== 'string' || !DATE_PATTERN.test(entryDate)) {
+            return { ok: false, error: 'the entry date is missing or invalid (expected YYYY-MM-DD) and repeat.start is not given' };
+        }
+        repeat.start = entryDate;
+    } else {
+        if (typeof input.start !== 'string' || !DATE_PATTERN.test(input.start)) {
+            return { ok: false, error: 'repeat.start must be a date in YYYY-MM-DD format' };
+        }
+        repeat.start = input.start;
     }
-    if (typeof start !== 'string' || !DATE_PATTERN.test(start)) {
-        return { ok: false, error: 'repeat.start must be a date in YYYY-MM-DD format' };
-    }
-    repeat.start = start;
 
     if (input.end !== undefined) {
         if (typeof input.end !== 'string' || !DATE_PATTERN.test(input.end)) {

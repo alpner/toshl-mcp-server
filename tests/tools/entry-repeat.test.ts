@@ -64,7 +64,7 @@ describe('normalizeRepeat', () => {
     test('rejects a repeat without a start when there is no entry date to fall back on', () => {
         const result = normalizeRepeat({ frequency: 'monthly' }, {});
         expect(result.ok).toBe(false);
-        expect(result.error).toContain('repeat.start');
+        expect(result.error).toContain('the entry date is missing or invalid');
     });
 
     test('rejects a non-object', () => {
@@ -177,6 +177,15 @@ describe('entry_create with repeat', () => {
 
         expect(result.isError).toBe(true);
         expect(result.content[0].text).toContain('Invalid repeat');
+        expect(mockPost).not.toHaveBeenCalled();
+    });
+
+    test('a malformed entry date without repeat.start is reported as the entry date', async () => {
+        const result = await handleEntryCreateTool({ ...BASE, date: '10/10/2026', repeat: { frequency: 'monthly' } });
+
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toContain('the entry date is missing or invalid');
+        expect(result.content[0].text).not.toContain('repeat.start must be');
         expect(mockPost).not.toHaveBeenCalled();
     });
 
