@@ -32,7 +32,7 @@ export const REPEAT_INPUT_SCHEMA = {
         + 'Repeating every two months is frequency monthly with interval 2. '
         + 'A series ends at end or after count repetitions; the two are mutually exclusive, and with neither it repeats without an end date. '
         + 'On entry_create, start defaults to the entry date and interval to 1. '
-        + 'On entry_update, the given fields are merged into the existing series.',
+        + 'On entry_update, the given fields are merged into the existing series, and an end or count given replaces the other.',
     properties: {
         frequency: {
             type: 'string',

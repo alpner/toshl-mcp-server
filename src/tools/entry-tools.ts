@@ -406,7 +406,9 @@ export function setupEntryTools() {
                     repeat: REPEAT_INPUT_SCHEMA,
                     updateMode: {
                         type: 'string',
-                        description: 'Update mode for repeating entries (all, one, tail)',
+                        description: 'Update mode for repeating entries (all, one, tail). '
+                            + 'When omitted, Toshl uses all, which applies the update to every entry in the series. '
+                            + 'Required when the update changes the repeat of an entry that already repeats.',
                         enum: ['all', 'one', 'tail'],
                     },
                 },

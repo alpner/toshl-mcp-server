@@ -107,7 +107,21 @@ export class EntriesClient {
             if (!existingEntry.repeat && !entry.repeat.frequency) {
                 throw new Error('repeat.frequency is required to make a non-repeating entry repeat');
             }
-            updatedEntry.repeat = { ...currentRepeat, ...entry.repeat } as ToshlRepeat;
+            // Toshl applies a series change to every entry in it unless told otherwise, so the scope
+            // of a repeat change on an existing series has to be chosen explicitly.
+            if (existingEntry.repeat && updateMode === undefined) {
+                throw new Error('updateMode is required to change the repeat of a repeating entry: '
+                    + 'one, tail or all. Without it Toshl applies the change to all entries in the series.');
+            }
+            // The cast covers a new series, which has no id until Toshl assigns one
+            const mergedRepeat = { ...currentRepeat, ...entry.repeat } as ToshlRepeat;
+            // end and count are mutually exclusive, so whichever the caller sets replaces the other
+            if (entry.repeat.end !== undefined) {
+                delete mergedRepeat.count;
+            } else if (entry.repeat.count !== undefined) {
+                delete mergedRepeat.end;
+            }
+            updatedEntry.repeat = mergedRepeat;
         }
 
         // Make sure all required fields are present
