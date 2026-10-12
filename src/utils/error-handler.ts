@@ -10,12 +10,15 @@ import logger from './logger.js';
 export function mapApiErrorToMcpError(error: ApiError): McpError {
     logger.debug('Mapping API error to MCP error', { error });
 
+    // Toshl's error id is the stable part of the body; the description is localized
+    const detail = error.id ? `${error.message} (id: ${error.id})` : error.message;
+
     // Map HTTP status codes to MCP error codes
     switch (error.status) {
         case 400:
             return new McpError(
                 ErrorCode.InvalidParams,
-                `Invalid request: ${error.message}`
+                `Invalid request: ${detail}`
             );
         case 401:
             return new McpError(
@@ -25,17 +28,17 @@ export function mapApiErrorToMcpError(error: ApiError): McpError {
         case 403:
             return new McpError(
                 ErrorCode.InvalidRequest,
-                `Access denied: ${error.message}`
+                `Access denied: ${detail}`
             );
         case 404:
             return new McpError(
                 ErrorCode.MethodNotFound,
-                `Resource not found: ${error.message}`
+                `Resource not found: ${detail}`
             );
         case 409:
             return new McpError(
                 ErrorCode.InvalidRequest,
-                `Conflict: ${error.message}`,
+                `Conflict: ${detail}`,
                 { status: 409 }
             );
         case 429:
@@ -49,12 +52,12 @@ export function mapApiErrorToMcpError(error: ApiError): McpError {
         case 504:
             return new McpError(
                 ErrorCode.InternalError,
-                `Toshl API server error: ${error.message}`
+                `Toshl API server error: ${detail}`
             );
         default:
             return new McpError(
                 ErrorCode.InternalError,
-                `Unexpected error: ${error.message}`
+                `Unexpected error: ${detail}`
             );
     }
 }
@@ -99,7 +102,7 @@ export function handleApiError(error: any): never {
         const apiError: ApiError = {
             status: error.response.status,
             message: readToshlErrorMessage(error.response.data) || error.message,
-            code: error.response.data?.code,
+            id: typeof error.response.data?.id === 'string' ? error.response.data.id : undefined,
             details: error.response.data
         };
 

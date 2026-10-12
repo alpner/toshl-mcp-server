@@ -200,7 +200,8 @@ export interface ApiResponse<T> {
 export interface ApiError {
     status: number;
     message: string;
-    code?: string;
+    /** Toshl's error identifier, e.g. `input_error` (see docs/api/errors.md) */
+    id?: string;
     details?: any;
 }
 

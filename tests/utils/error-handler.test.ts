@@ -8,7 +8,7 @@ describe('Error Handler', () => {
         const apiError: ApiError = {
             status: 401,
             message: 'Unauthorized',
-            code: 'unauthorized'
+            id: 'unauthorized'
         };
 
         // Map error
@@ -24,7 +24,7 @@ describe('Error Handler', () => {
         const apiError: ApiError = {
             status: 404,
             message: 'Not Found',
-            code: 'not_found'
+            id: 'not_found'
         };
 
         // Map error
@@ -40,7 +40,7 @@ describe('Error Handler', () => {
         const apiError: ApiError = {
             status: 400,
             message: 'Bad Request',
-            code: 'bad_request'
+            id: 'bad_request'
         };
 
         // Map error
@@ -56,7 +56,7 @@ describe('Error Handler', () => {
         const apiError: ApiError = {
             status: 429,
             message: 'Too Many Requests',
-            code: 'rate_limit_exceeded'
+            id: 'rate_limit_exceeded'
         };
 
         // Map error
@@ -72,7 +72,7 @@ describe('Error Handler', () => {
         const apiError: ApiError = {
             status: 500,
             message: 'Internal Server Error',
-            code: 'server_error'
+            id: 'server_error'
         };
 
         // Map error
@@ -88,7 +88,7 @@ describe('Error Handler', () => {
         const apiError: ApiError = {
             status: 418, // I'm a teapot
             message: 'I\'m a teapot',
-            code: 'teapot'
+            id: 'teapot'
         };
 
         // Map error
@@ -150,5 +150,45 @@ describe('handleApiError', () => {
     test('falls back to message, then to the axios text', () => {
         expect(thrownBy(axiosError(403, { message: 'Nope.' })).message).toContain('Access denied: Nope.');
         expect(thrownBy(axiosError(403, undefined)).message).toContain('Access denied: Request failed with status code 403');
+    });
+
+    test('appends the Toshl error id when the body has one', () => {
+        const mcpError = thrownBy(axiosError(400, { id: 'input_error', description: 'Data error.' }));
+
+        expect(mcpError.code).toBe(ErrorCode.InvalidParams);
+        expect(mcpError.message).toBe('MCP error -32602: Invalid request: Data error. (id: input_error)');
+    });
+
+    test('appends the id after the field errors', () => {
+        const mcpError = thrownBy(axiosError(400, {
+            id: 'input_error',
+            description: 'Could not insert expense.',
+            fields: [{ field: 'amount', error: 'Amount cannot be zero.' }],
+        }));
+
+        expect(mcpError.message).toBe(
+            'MCP error -32602: Invalid request: Could not insert expense. amount: Amount cannot be zero. (id: input_error)'
+        );
+    });
+
+    test('leaves the message unchanged when the body has no id', () => {
+        expect(thrownBy(axiosError(400, { description: 'Data error.' })).message)
+            .toBe('MCP error -32602: Invalid request: Data error.');
+        expect(thrownBy(axiosError(409, { description: 'Tag already exists.' })).message)
+            .toBe('MCP error -32600: Conflict: Tag already exists.');
+        expect(thrownBy(axiosError(403, undefined)).message)
+            .toBe('MCP error -32600: Access denied: Request failed with status code 403');
+    });
+
+    test('ignores an id that is not a string', () => {
+        expect(thrownBy(axiosError(400, { id: { nested: true }, description: 'Data error.' })).message)
+            .toBe('MCP error -32602: Invalid request: Data error.');
+    });
+
+    test('keeps the fixed 401 and 429 texts even when the body has an id', () => {
+        expect(thrownBy(axiosError(401, { id: 'unauthorized', description: 'Bad token.' })).message)
+            .toBe('MCP error -32600: Authentication failed. Please check your API token.');
+        expect(thrownBy(axiosError(429, { id: 'rate_limit', description: 'Slow down.' })).message)
+            .toBe('MCP error -32600: Rate limit exceeded. Please try again later.');
     });
 });
