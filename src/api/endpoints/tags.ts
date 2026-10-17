@@ -113,7 +113,7 @@ export class TagsClient {
         const response = await this.client.post<ToshlTag>('/tags', tag);
         const id = response.headers['location']?.split('/').pop();
         if (!id) {
-            logger.debug('Response', response);
+            logger.debug('Response', { status: response.status });
             throw new Error('Invalid response. Expected location header to contain tag ID');
         }
 

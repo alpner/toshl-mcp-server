@@ -72,9 +72,9 @@ export class EntriesClient {
     async createEntry(entry: Partial<ToshlEntry>): Promise<ToshlEntry> {
         logger.debug('Creating entry', { entry });
         const response = await this.client.post<ToshlEntry>('/entries', entry);
-        const id = response.headers['location'].split('/').pop();
+        const id = response.headers['location']?.split('/').pop();
         if (!id) {
-            logger.debug('Response', response)
+            logger.debug('Response', { status: response.status });
             throw new Error('Invalid response. Expected location header to contain entry ID');
         }
         return await this.getEntry(id);
