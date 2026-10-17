@@ -1,0 +1,26 @@
+# toshl-mcp - Toshl Finance MCP server, served at https://toshl-mcp.alpner.com through Caddy.
+# Installed as /srv/toshl-mcp/docker-compose.yml. The image is built on this server by
+# deploy.sh from the fork's deploy/vps branch (see DEPLOY.md).
+services:
+  toshl-mcp:
+    image: toshl-mcp:current
+    container_name: toshl-mcp
+    restart: unless-stopped
+    # Secrets only (Toshl token, OAuth passphrase and signing key). root-only, chmod 600.
+    env_file: ./toshl-mcp.env
+    environment:
+      - LOG_LEVEL=info
+      - MCP_PUBLIC_URL=https://toshl-mcp.alpner.com
+      - MCP_ALLOWED_HOSTS=toshl-mcp.alpner.com
+      # Every request arrives through Caddy, which appends the real client address.
+      - MCP_TRUST_PROXY=true
+    volumes:
+      # Refresh-token hashes, so sign-ins survive redeploys. Owned by uid 1000.
+      - ./state:/app/state
+    networks:
+      - web
+    # No "ports:" - reachable only through Caddy on the "web" network.
+
+networks:
+  web:
+    external: true
