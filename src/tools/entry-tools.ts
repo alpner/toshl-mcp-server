@@ -4,6 +4,7 @@ import { createCategoriesClient } from '../api/endpoints/categories.js';
 import { ToshlEntry, ToshlImage, ToshlTransaction } from '../utils/types.js';
 import { evaluateSplitParent, evaluateSplitParts, SplitParentVerdict, SplitPartsVerdict, toCents } from './split-guard.js';
 import { matchRestoredEntry, RestoredEntryMatch } from './split-restore.js';
+import { normalizeRepeat, REPEAT_INPUT_SCHEMA } from './repeat.js';
 import logger from '../utils/logger.js';
 
 // Toshl's documented per_page bounds for GET /entries (docs/api/entries-list.md)
@@ -269,7 +270,8 @@ export function setupEntryTools() {
         },
         {
             name: 'entry_create',
-            description: 'Create a new entry in Toshl Finance. To create a transfer between accounts, include a transaction object with the destination account ID and currency.',
+            description: 'Create a new entry in Toshl Finance. To create a transfer between accounts, include a transaction object with the destination account ID and currency. A repeat object creates a repeating entry; '
+                + 'with neither end nor count in it, the series has no end date.',
             inputSchema: {
                 type: 'object',
                 properties: {
@@ -341,13 +343,15 @@ export function setupEntryTools() {
                         },
                         required: ['account', 'currency'],
                     },
+                    repeat: REPEAT_INPUT_SCHEMA,
                 },
                 required: ['amount', 'currency', 'date', 'account', 'category'],
             },
         },
         {
             name: 'entry_update',
-            description: 'Update an existing entry in Toshl Finance',
+            description: 'Update an existing entry in Toshl Finance. The repeat of an existing entry cannot be changed through this tool; '
+                + 'a new repeating series is created with entry_create.',
             inputSchema: {
                 type: 'object',
                 properties: {
@@ -403,7 +407,8 @@ export function setupEntryTools() {
                     },
                     updateMode: {
                         type: 'string',
-                        description: 'Update mode for repeating entries (all, one, tail)',
+                        description: 'Update mode for repeating entries (all, one, tail). '
+                            + 'When omitted, Toshl uses all, which applies the update to every entry in the series.',
                         enum: ['all', 'one', 'tail'],
                     },
                 },
@@ -742,9 +747,26 @@ export async function handleEntryCreateTool(args: any) {
         };
     }
 
+    const entryData = { ...args };
+    if (args.repeat !== undefined) {
+        const repeat = normalizeRepeat(args.repeat, { defaultStart: args.date });
+        if (!repeat.ok) {
+            return {
+                content: [
+                    {
+                        type: 'text',
+                        text: `Invalid repeat: ${repeat.error}`,
+                    },
+                ],
+                isError: true,
+            };
+        }
+        entryData.repeat = repeat.repeat;
+    }
+
     try {
         const entriesClient = await createEntriesClient();
-        const entry = await entriesClient.createEntry(args);
+        const entry = await entriesClient.createEntry(entryData);
 
         return {
             content: [
@@ -784,6 +806,20 @@ export async function handleEntryUpdateTool(args: any) {
                 {
                     type: 'text',
                     text: 'Missing required parameter: id',
+                },
+            ],
+            isError: true,
+        };
+    }
+
+    // Toshl ignores a repeat on update, so refuse it rather than report a change that did not happen
+    if (args.repeat !== undefined) {
+        return {
+            content: [
+                {
+                    type: 'text',
+                    text: 'repeat cannot be changed through entry_update: Toshl\'s PUT schema marks every repeat field readonly. '
+                        + 'Create a new repeating series with entry_create.',
                 },
             ],
             isError: true,
